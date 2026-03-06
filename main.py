@@ -6,7 +6,7 @@ import re
 import logging
 import threading
 from datetime import datetime
-from flask import Flask, render_template_string, request, redirect, url_for, jsonify
+from flask import Flask, render_template_string, request, redirect, url_for, jsonify, session
 from telethon import TelegramClient, events
 import aiohttp
 
@@ -15,6 +15,7 @@ BASE_DIR = os.path.dirname(os.path.realpath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, 'radar_config.json')
 KEYWORDS_FILE = os.path.join(BASE_DIR, 'radar_keywords.txt')
 LOG_FILE = os.path.join(BASE_DIR, 'radar.log')
+SESSION_FILE = os.path.join(BASE_DIR, 'flask_session.json')
 
 # إعداد تسجيل الأحداث
 logging.basicConfig(
@@ -30,6 +31,9 @@ running = False
 clients = []
 loop = None
 radar_thread = None
+
+# تخزين طلبات التحقق مؤقتاً
+verification_requests = {}  # phone -> {"future": asyncio.Future, "type": "code" or "password"}
 
 # -------------------- دوال تحميل/حفظ الإعدادات --------------------
 def load_config():
@@ -92,6 +96,21 @@ async def classify_with_openrouter(text, api_key, prompt_template):
         logging.error(f"OpenRouter error: {e}")
     return None
 
+# -------------------- دوال التحقق (Code & Password) --------------------
+async def get_verification_code(phone):
+    """تطلب رمز التحقق وتنتظر إدخاله من لوحة التحكم"""
+    future = asyncio.Future()
+    verification_requests[phone] = {"future": future, "type": "code"}
+    logging.info(f"📱 طلب رمز تحقق للحساب {phone}")
+    return await future
+
+async def get_verification_password(phone):
+    """تطلب كلمة المرور للتحقق بخطوتين"""
+    future = asyncio.Future()
+    verification_requests[phone] = {"future": future, "type": "password"}
+    logging.info(f"🔐 طلب كلمة مرور للتحقق بخطوتين للحساب {phone}")
+    return await future
+
 # -------------------- دالة مراقبة حساب واحد --------------------
 async def monitor_account(acc, openrouter_cfg):
     phone = acc['phone']
@@ -105,7 +124,12 @@ async def monitor_account(acc, openrouter_cfg):
     clients.append(client)
 
     try:
-        await client.start(phone=phone)
+        # تسجيل الدخول مع دعم التحقق
+        await client.start(
+            phone=phone,
+            code_callback=lambda: get_verification_code(phone),
+            password_callback=lambda: get_verification_password(phone)
+        )
         logging.info(f"✅ {phone} connected")
 
         if alert_group:
@@ -211,8 +235,9 @@ def stop_radar():
 
 # -------------------- تطبيق Flask --------------------
 app = Flask(__name__)
+app.secret_key = os.urandom(24)  # مطلوب للجلسات
 
-# قالب HTML مدمج (للبساطة)
+# قالب HTML مدمج (مع إضافة حقول التحقق)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html dir="rtl" lang="ar">
@@ -242,11 +267,38 @@ HTML_TEMPLATE = """
         .running { background: #5cb85c; }
         .stopped { background: #d9534f; }
         .arabic { font-family: 'Tahoma', sans-serif; }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7); }
+        .modal-content { background: #2a2a3a; margin: 10% auto; padding: 30px; border-radius: 10px; width: 400px; color: #fff; }
+        .close { color: #aaa; float: left; font-size: 28px; font-weight: bold; cursor: pointer; }
+        .close:hover { color: #ffaa00; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🚀 رادار التليجرام الذكي - لوحة التحكم</h1>
+        
+        <!-- نافذة رمز التحقق -->
+        <div id="codeModal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closeCodeModal()">&times;</span>
+                <h3 id="codeTitle">🔐 إدخال رمز التحقق</h3>
+                <p id="codePhone"></p>
+                <input type="text" id="codeInput" placeholder="أدخل الرمز المرسل إلى تليجرام" style="width:100%; padding:10px; margin:10px 0;">
+                <button onclick="submitCode()" style="width:100%;">إرسال الرمز</button>
+            </div>
+        </div>
+        
+        <!-- نافذة كلمة المرور (للتحقق بخطوتين) -->
+        <div id="passwordModal" class="modal">
+            <div class="modal-content">
+                <span class="close" onclick="closePasswordModal()">&times;</span>
+                <h3>🔐 إدخال كلمة المرور</h3>
+                <p id="passwordPhone"></p>
+                <input type="password" id="passwordInput" placeholder="أدخل كلمة المرور للتحقق بخطوتين" style="width:100%; padding:10px; margin:10px 0;">
+                <button onclick="submitPassword()" style="width:100%;">إرسال كلمة المرور</button>
+            </div>
+        </div>
+
         <div class="card">
             <div class="flex">
                 <h2>حالة الرادار</h2>
@@ -343,13 +395,97 @@ HTML_TEMPLATE = """
                     document.getElementById('log-box').innerText = data;
                 });
         }
-        // تحديث تلقائي كل 10 ثوان
+        
+        // التحقق من وجود طلبات تحقق جديدة كل ثانيتين
+        function checkVerificationRequests() {
+            fetch('/api/verification-requests')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.phone && data.type) {
+                        if (data.type === 'code') {
+                            document.getElementById('codePhone').innerText = 'رقم الحساب: ' + data.phone;
+                            document.getElementById('codeModal').style.display = 'block';
+                        } else if (data.type === 'password') {
+                            document.getElementById('passwordPhone').innerText = 'رقم الحساب: ' + data.phone;
+                            document.getElementById('passwordModal').style.display = 'block';
+                        }
+                    }
+                });
+        }
+        
+        function submitCode() {
+            const code = document.getElementById('codeInput').value;
+            fetch('/api/submit-code', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({code: code})
+            }).then(() => {
+                document.getElementById('codeModal').style.display = 'none';
+                document.getElementById('codeInput').value = '';
+            });
+        }
+        
+        function submitPassword() {
+            const password = document.getElementById('passwordInput').value;
+            fetch('/api/submit-password', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({password: password})
+            }).then(() => {
+                document.getElementById('passwordModal').style.display = 'none';
+                document.getElementById('passwordInput').value = '';
+            });
+        }
+        
+        function closeCodeModal() {
+            document.getElementById('codeModal').style.display = 'none';
+        }
+        
+        function closePasswordModal() {
+            document.getElementById('passwordModal').style.display = 'none';
+        }
+        
         setInterval(refreshLog, 10000);
+        setInterval(checkVerificationRequests, 2000);
     </script>
 </body>
 </html>
 """
 
+# -------------------- مسارات Flask الجديدة للتحقق --------------------
+@app.route('/api/verification-requests')
+def verification_requests_api():
+    """إرجاع أي طلب تحقق معلق"""
+    for phone, req in verification_requests.items():
+        if not req["future"].done():
+            return {"phone": phone, "type": req["type"]}
+    return {}
+
+@app.route('/api/submit-code', methods=['POST'])
+def submit_code():
+    """استلام رمز التحقق من المستخدم"""
+    data = request.get_json()
+    code = data.get('code', '')
+    for phone, req in list(verification_requests.items()):
+        if req["type"] == "code" and not req["future"].done():
+            req["future"].set_result(code)
+            del verification_requests[phone]
+            break
+    return {"status": "ok"}
+
+@app.route('/api/submit-password', methods=['POST'])
+def submit_password():
+    """استلام كلمة المرور من المستخدم"""
+    data = request.get_json()
+    password = data.get('password', '')
+    for phone, req in list(verification_requests.items()):
+        if req["type"] == "password" and not req["future"].done():
+            req["future"].set_result(password)
+            del verification_requests[phone]
+            break
+    return {"status": "ok"}
+
+# -------------------- المسارات الأساسية --------------------
 @app.route('/')
 def index():
     config = load_config()
@@ -385,7 +521,6 @@ def add_account():
     
     config = load_config()
     accounts_list = config.get("accounts", [])
-    # التحقق من عدم تكرار الرقم
     if any(acc['phone'] == phone for acc in accounts_list):
         return "هذا الحساب موجود بالفعل", 400
     
@@ -457,5 +592,5 @@ if __name__ == '__main__':
         save_config([], {"api_key": "", "enabled": False, "prompt": "قم بتحليل الرسالة وتحديد ما إذا كان المرسل مسوقاً أو باحثاً."})
     
     # تشغيل خادم Flask مع دعم المنفذ المتغير لـ Render
-    port = int(os.environ.get("PORT", 5000))  # هذا هو التعديل المهم
+    port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
