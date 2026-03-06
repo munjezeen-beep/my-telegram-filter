@@ -184,9 +184,9 @@ async def monitor_account(acc, openrouter_cfg):
                             reason = ai_result.get("reason", "")
                             logging.info(f"🤖 AI: {sender_type} ({confidence}%) - {reason}")
                             if sender_type == "marketer" and confidence > 60:
-                                logging.info(f"🚫 Ignored marketer message")
-                                return  # لا ترسل
-
+                                logging.info(f"🚫 Ignored marketer message (ثقة {confidence}%)")
+                                return  # لا ترسل - الخروج من الدالة بالكامل
+                                
                     # إرسال الإشعار فقط إذا كان seeker (أو التصنيف معطل)
                     if alert_group:
                         try:
