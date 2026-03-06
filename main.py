@@ -124,12 +124,22 @@ async def monitor_account(acc, openrouter_cfg):
     clients.append(client)
 
     try:
-        # تسجيل الدخول مع دعم التحقق
-        await client.start(
-            phone=phone,
-            code_callback=lambda: get_verification_code(phone),
-            password_callback=lambda: get_verification_password(phone)
-        )
+        # تسجيل الدخول بطريقة متوافقة مع جميع إصدارات Telethon
+        await client.connect()
+        if not await client.is_user_authorized():
+            # إرسال طلب رمز التحقق
+            await client.send_code_request(phone)
+            code = await get_verification_code(phone)
+            try:
+                await client.sign_in(phone, code)
+            except Exception as e:
+                # إذا طلب كلمة مرور (تحقق بخطوتين)
+                if "password" in str(e).lower() or "2fa" in str(e).lower():
+                    password = await get_verification_password(phone)
+                    await client.sign_in(password=password)
+                else:
+                    raise e
+
         logging.info(f"✅ {phone} connected")
 
         if alert_group:
