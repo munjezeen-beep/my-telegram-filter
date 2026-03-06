@@ -456,5 +456,6 @@ if __name__ == '__main__':
     if not os.path.exists(CONFIG_FILE):
         save_config([], {"api_key": "", "enabled": False, "prompt": "قم بتحليل الرسالة وتحديد ما إذا كان المرسل مسوقاً أو باحثاً."})
     
-    # تشغيل خادم Flask (يمكن تغيير المنفذ)
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
+    # تشغيل خادم Flask مع دعم المنفذ المتغير لـ Render
+    port = int(os.environ.get("PORT", 5000))  # هذا هو التعديل المهم
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
