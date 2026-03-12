@@ -17,7 +17,6 @@ KEYWORDS_FILE = os.path.join(BASE_DIR, 'radar_keywords.txt')
 LOG_FILE = os.path.join(BASE_DIR, 'radar.log')
 SESSION_FILE = os.path.join(BASE_DIR, 'flask_session.json')
 
-# إعداد تسجيل الأحداث
 logging.basicConfig(
     filename=LOG_FILE,
     level=logging.INFO,
@@ -32,10 +31,447 @@ clients = []
 loop = None
 radar_thread = None
 
-# تخزين طلبات التحقق مؤقتاً
 verification_requests = {}  # phone -> {"future": asyncio.Future, "type": "code" or "password"}
 
-# -------------------- دوال تحميل/حفظ الإعدادات --------------------
+# -------------------- قوائم الميزات المميزة للمعلنين والطلاب (موسعة جداً) --------------------
+
+# كلمات مفتاحية تدل على أن المرسل طالب (يريد خدمة) - مع تنويعات الهمزات والعامية
+SEEKER_KEYWORDS = [
+    # طلب مساعدة عام
+    'ابي احد', 'ابي حد', 'ابغى احد', 'ابغى حد', 'تعرفون احد', 'تعرفون حد',
+    'من يعرف احد', 'من يعرف حد', 'احد يعرف', 'حد يعرف', 'فيه احد', 'فيه حد',
+    'في احد', 'في حد', 'عندكم احد', 'عندكم حد', 'احد عنده', 'حد عنده',
+    'محتاج', 'محتاجة', 'محوج', 'محوجة', 'ضروري', 'مستعجل', 'مستعجلة',
+
+    # طلب شرح
+    'يشرح', 'شرح', 'دروس خصوصية', 'درس خصوصي', 'خصوصي', 'مدرس خصوصي',
+    'معلم خصوصي', 'دكتور خصوصي', 'يشرح لي', 'تشرح لي', 'يشرحلي', 'تشرحلي',
+    'يفهمني', 'تفهمني', 'يفهم', 'تفهم',
+
+    # طلب حل (واجبات، تكاليف، الخ)
+    'يحل', 'حل', 'يخل', 'حل واجب', 'حل واجبات', 'حل التكليف', 'حل التكاليف',
+    'حل اسايمنت', 'حل assignment', 'يسوي', 'يسوي لي', 'يسويلي', 'تسوي',
+    'تسوي لي', 'تسويلي', 'يعمل', 'يعمل لي', 'يعملي', 'تعمل', 'تعمل لي',
+    'تعملي', 'ينفذ', 'ينفذ لي', 'ينفذلي',
+
+    # طلب كتابة/بحث/مشروع
+    'يكتب', 'يكتب لي', 'يكتبلي', 'تكتب', 'تكتب لي', 'تكتبلي',
+    'بحث', 'بحوث', 'تقرير', 'تقارير', 'مشروع', 'مشاريع', 'بروجكت',
+    'ريبورت', 'report', 'research', 'paper', 'thesis', 'اطروحة',
+    'سيرة ذاتية', 'cv', 'تصميم', 'تصاميم', 'بوستر', 'poster', 'برزنتيشن',
+    'presentation', 'بوربوينت', 'powerpoint',
+
+    # طلب ترجمة/تلخيص
+    'يترجم', 'يترجم لي', 'يترجملي', 'تترجم', 'تترجم لي', 'تترجملي',
+    'ترجمة', 'يلخص', 'يلخص لي', 'يلخصلي', 'تلخيص', 'يدقق', 'يدقق لي',
+    'يدققلي', 'تدقيق', 'تصحيح', 'يصحح', 'يصحح لي', 'يصححلي',
+
+    # كلمات استفهام طلابية
+    'كيف اسوي', 'كيف أعمل', 'كيف أذاكر', 'كيف أحل', 'وين ألقى', 'من وين',
+    'مصدر', 'مرجع', 'اللي عنده خبرة', 'اللي جرب', 'اللي يعرف',
+
+    # كلمات خليجية وعامية متنوعة
+    'ابي', 'ابغى', 'ودي', 'نبي', 'نبغى', 'تبي', 'تبغى', 'يبي', 'يبغى',
+    'عندك', 'عندج', 'عندكم', 'فيكم', 'تقدرون', 'تكفون', 'يا جماعة',
+    'يا شباب', 'يا بنات', 'يا اخوان', 'ياحلوين', 'الرجاء', 'لو سمحتم',
+    'جزاكم الله خير', 'يعطيكم العافية', 'بيض الله وجهكم', 'يسعدكم ربي',
+
+    # مساعدة في الاختبارات
+    'كويز', 'اختبار', 'امتحان', 'فاينل', 'ميد', 'كويزات', 'اختبارات',
+    'مراجعة', 'ليلة الامتحان', 'اسئلة', 'نماذج', 'تجميعات',
+]
+
+# كلمات مفتاحية تدل على أن المرسل معلن (يقدم خدمات) - مع تنويعات
+MARKETER_KEYWORDS = [
+    # كلمات خدمية
+    'نقدم', 'نوفر', 'لدينا', 'عندنا', 'يتوفر', 'خدمات', 'خدمة', 'مساعدة',
+    'إنجاز', 'تنفيذ', 'عمل', 'أعمال', 'حل', 'حلول',
+
+    # عروض وخصومات
+    'عرض', 'عروض', 'خصم', 'تخفيض', 'حسم', 'لفترة محدودة', 'العرض ساري',
+    'بمناسبة', 'فرصة', 'خصم خاص', 'خصم 50', 'خصم 30',
+
+    # تواصل
+    'للتواصل', 'راسلني', 'كلمني', 'تواصل', 'واتس', 'واتساب', 'wa.me',
+    't.me', 'تلجرام', 'تيليجرام', 'قناتي', 'بوت', 'رابط',
+
+    # أسماء شركات/منصات
+    'شركة', 'مؤسسة', 'أكاديمية', 'منصة', 'فريق', 'نخبة', 'خبراء',
+    'متخصصون', 'محترفون', 'مكتب', 'مركز',
+
+    # صياغات إعلانية
+    'احترافي', 'ممتاز', 'أفضل', 'الأفضل', 'بجودة عالية', 'بدقة', 'بسرعة',
+    'في الموعد', 'ضمان', 'ثقة', 'أمانة', 'نضمن لك', 'لسنا الوحيدون',
+    'لكننا الأفضل', 'العدد محدود', 'باقي عدد', 'انضم', 'سارع', 'اغتنم',
+    'احجز', 'اشترك', 'عضوية', 'باقة',
+
+    # خدمات محددة (غالباً ما يذكرها المعلنون)
+    'حل واجبات', 'حل واجب', 'بحوث', 'تقرير', 'تقارير', 'مشاريع', 'مشروع',
+    'بروجكت', 'ترجمة', 'تلخيص', 'تحليل إحصائي', 'spss', 'تصميم', 'جرافيك',
+    'سيرة ذاتية', 'بوستر', 'برزنتيشن', 'بوربوينت', 'أبحاث', 'رسائل',
+    'ماجستير', 'دكتوراه', 'ترقية', 'نشر علمي', 'مؤتمر',
+
+    # روابط وأرقام
+    r'\+?\d{9,}',  # أرقام هواتف
+    r'@\w+',       # يوزرات تلجرام
+]
+
+# كلمات استفسارية (غير واضحة النية)
+INQUIRY_KEYWORDS = [
+    'هل', 'هل فيه', 'هل في', 'ليش', 'لشنو', 'وش', 'وشو', 'ايش', 'ماهو',
+    'ماهي', 'كيف', 'كيفية', 'متى', 'وين', 'من وين', 'كم', 'كم سعر',
+    'كم التكلفة', 'بكم', 'أحد جرب', 'من جرب', 'تجربة', 'نصيحة', 'رأيكم',
+    'ش رايكم', 'شو رأيك', 'شفتو', 'تقرأ عن', 'تسمع عن', 'طريقة', 'كيفية',
+    'استفسار', 'سؤال', 'عندي سؤال', 'عندي استفسار',
+]
+
+# دوال مساعدة للتصنيف المبني على القواعد
+
+def normalize_text(text):
+    """تطبيع النص للتعامل مع التنوعات اللغوية (الهمزات، التاء المربوطة، الألف المقصورة)"""
+    text = text.lower()
+    # توحيد الهمزات
+    text = re.sub(r'[إأآا]', 'ا', text)
+    text = re.sub(r'[ى]', 'ي', text)
+    text = re.sub(r'[ة]', 'ه', text)
+    # إزالة الحركات (اختياري)
+    text = re.sub(r'[\u064B-\u0652]', '', text)  # إزالة الفتحة والضمة والكسرة
+    return text
+
+def contains_any(text, keywords):
+    """التحقق من وجود أي كلمة من القائمة في النص (مع التطبيع)"""
+    normalized = normalize_text(text)
+    for kw in keywords:
+        # تطبيع الكلمة المفتاحية أيضاً
+        normalized_kw = normalize_text(kw)
+        if normalized_kw in normalized:
+            return True
+    return False
+
+def count_keywords(text, keywords):
+    """حساب عدد الكلمات المفتاحية الموجودة في النص"""
+    normalized = normalize_text(text)
+    count = 0
+    for kw in keywords:
+        normalized_kw = normalize_text(kw)
+        if normalized_kw in normalized:
+            count += 1
+    return count
+
+def has_link(text):
+    """كشف الروابط بأنواعها"""
+    patterns = [
+        r'https?://\S+', r't\.me/\S+', r'wa\.me/\S+', r'telegram\.me/\S+',
+        r'@\w+', r'\+\d{9,}', r'\d{10,}',  # أرقام هواتف
+        r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'  # بريد إلكتروني
+    ]
+    for pat in patterns:
+        if re.search(pat, text):
+            return True
+    return False
+
+def has_emoji(text):
+    """الكشف عن الرموز التعبيرية"""
+    emoji_pattern = re.compile("["
+        u"\U0001F600-\U0001F64F"  # emoticons
+        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+        u"\U0001F680-\U0001F6FF"  # transport & map symbols
+        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+        u"\U00002500-\U00002BEF"  # chinese char
+        u"\U00002702-\U000027B0"
+        u"\U000024C2-\U0001F251"
+        u"\U0001f926-\U0001f937"
+        u"\U00010000-\U0010ffff"
+        u"\u2600-\u26FF\u2B50\u23F8\u23F9\u23FA"
+        "]+", flags=re.UNICODE)
+    return bool(emoji_pattern.search(text))
+
+def detect_markdown(text):
+    """كشف التنسيقات (قوائم، نجوم، إلخ)"""
+    patterns = [
+        r'\*.*\*', r'\-.*\-', r'^\d+\.', r'^\•', r'^\-', r'^\*', r'^\d+\)',
+        r'\[.*\]\(.*\)', r'\|.*\|', r'^\#', r'^#{1,6}', r'✅', r'⭐', r'♦️',
+        r'▪️', r'▫️', r'🔹', r'🔸', r'🛑', r'⚠️'
+    ]
+    for pat in patterns:
+        if re.search(pat, text, re.MULTILINE):
+            return True
+    return False
+
+def has_list_pattern(text):
+    """كشف وجود قائمة منظمة (عدة أسطر تبدأ برموز)"""
+    lines = text.split('\n')
+    list_markers = ['•', '-', '*', '▪️', '▫️', '🔹', '🔸', '⭐', '✅', '♦️', '◾', '◽']
+    count = 0
+    for line in lines:
+        line = line.strip()
+        if line and (line[0] in list_markers or line.startswith(tuple(str(i)+'.' for i in range(1,10)))):
+            count += 1
+    return count >= 3
+
+def classify_local(text):
+    """
+    تصنيف محلي يعتمد على القواعد (بدون ذكاء اصطناعي خارجي)
+    يرجع dict: {'type': 'seeker'/'inquiry'/'marketer', 'confidence': 0-100, 'reason': str}
+    """
+    text = text.strip()
+    if not text:
+        return {'type': 'inquiry', 'confidence': 0, 'reason': 'empty'}
+
+    # حساب النتائج
+    seeker_count = count_keywords(text, SEEKER_KEYWORDS)
+    marketer_count = count_keywords(text, MARKETER_KEYWORDS)
+    inquiry_count = count_keywords(text, INQUIRY_KEYWORDS)
+    links = has_link(text)
+    emojis = has_emoji(text)
+    markdown = detect_markdown(text)
+    listy = has_list_pattern(text)
+    length = len(text)
+    has_question_mark = '?' in text or '؟' in text
+
+    # وزن النتائج
+    score_seeker = seeker_count * 3 + (1 if not links else 0) + (1 if has_question_mark and seeker_count > 0 else 0)
+    score_marketer = marketer_count * 4 + (5 if links else 0) + (3 if listy else 0) + (2 if markdown else 0) + (1 if emojis else 0)
+    score_inquiry = inquiry_count * 2 + (2 if has_question_mark else 0) + (1 if length < 150 and seeker_count == 0 and marketer_count == 0 else 0)
+
+    # تسجيل لأغراض التصحيح
+    logging.debug(f"Seeker score: {score_seeker}, Marketer: {score_marketer}, Inquiry: {score_inquiry}")
+
+    # تحديد النوع بناءً على أعلى درجة
+    if score_marketer > score_seeker and score_marketer > score_inquiry and score_marketer >= 3:
+        return {'type': 'marketer', 'confidence': min(100, score_marketer * 10), 'reason': f'marker_score={score_marketer}'}
+    elif score_seeker > score_marketer and score_seeker > score_inquiry and score_seeker >= 2:
+        return {'type': 'seeker', 'confidence': min(100, score_seeker * 10), 'reason': f'seeker_score={score_seeker}'}
+    elif score_inquiry > score_seeker and score_inquiry > score_marketer and score_inquiry >= 1:
+        return {'type': 'inquiry', 'confidence': min(100, score_inquiry * 15), 'reason': f'inquiry_score={score_inquiry}'}
+    else:
+        # لو مش واضح، نصنف كـ seeker افتراضياً (لأننا لا نريد فقدان طلاب)
+        return {'type': 'seeker', 'confidence': 30, 'reason': 'default'}
+
+# -------------------- دوال التصنيف بـ OpenRouter (اختياري) --------------------
+async def classify_with_openrouter(text, api_key, prompt_template):
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        # استخدام برومبت متخصص للتصنيف الثلاثي مع مراعاة العامية
+        enhanced_prompt = prompt_template + """
+
+قواعد التصنيف (مع مراعاة العامية الخليجية والعربية):
+- **seeker**: يطلب مساعدة في إنجاز عمل (حل واجب، مشروع، بحث، ترجمة، تصميم، ...). يستخدم عبارات مثل "ابي احد", "تعرفون احد", "من يعرف", "يشرح", "يحل", "يسوي", "محتاج". غالباً ما يكون طلباً مباشراً للقيام بمهمة.
+- **inquiry**: استفسار عام، سؤال عن معلومات، رأي، خبرة. مثل "هل فيه أحد يشرح؟", "كيف أسوي؟", "وين ألقى؟", "ليش؟". لا يطلب تنفيذ العمل مباشرة، بل يسأل عن كيفية أو عن مصدر.
+- **marketer**: إعلان أو ترويج لخدمات، عرض، قائمة خدمات، روابط واتساب، عروض تجارية. يحتوي على كلمات مثل "نقدم", "خصم", "للتواصل", "شركة", "خدمات". قد تكون رسالة طويلة منظمة مع رموز ترويجية.
+
+أعد JSON فقط بالشكل:
+{"type": "seeker" أو "inquiry" أو "marketer", "confidence": 0-100, "reason": "سبب مختصر بالعربية"}
+"""
+        data = {
+            "model": "qwen/qwen3-vl-30b-a3b-thinking",
+            "messages": [
+                {"role": "system", "content": enhanced_prompt},
+                {"role": "user", "content": text}
+            ]
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post("https://openrouter.ai/api/v1/chat/completions",
+                                    headers=headers, json=data, timeout=20) as resp:
+                if resp.status != 200:
+                    return None
+                result = await resp.json()
+                content = result["choices"][0]["message"]["content"]
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+    except Exception as e:
+        logging.error(f"OpenRouter error: {e}")
+    return None
+
+# -------------------- دوال التحقق (Code & Password) --------------------
+async def get_verification_code(phone):
+    future = asyncio.Future()
+    verification_requests[phone] = {"future": future, "type": "code"}
+    logging.info(f"📱 طلب رمز تحقق للحساب {phone}")
+    return await future
+
+async def get_verification_password(phone):
+    future = asyncio.Future()
+    verification_requests[phone] = {"future": future, "type": "password"}
+    logging.info(f"🔐 طلب كلمة مرور للتحقق بخطوتين للحساب {phone}")
+    return await future
+
+# -------------------- دالة مراقبة حساب واحد --------------------
+async def monitor_account(acc, openrouter_cfg):
+    phone = acc['phone']
+    api_id = acc['api_id']
+    api_hash = acc['api_hash']
+    main_channel = acc.get('main_channel', '')
+    inquiry_channel = acc.get('inquiry_channel', '')
+    spam_channel = acc.get('spam_channel', '')
+
+    session_name = f"session_{re.sub(r'\D', '', phone)}"
+    session_path = os.path.join(BASE_DIR, session_name)
+    client = TelegramClient(session_path, api_id, api_hash)
+    clients.append(client)
+
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            await client.send_code_request(phone)
+            code = await get_verification_code(phone)
+            try:
+                await client.sign_in(phone, code)
+            except Exception as e:
+                if "password" in str(e).lower() or "2fa" in str(e).lower():
+                    password = await get_verification_password(phone)
+                    await client.sign_in(password=password)
+                else:
+                    raise e
+
+        logging.info(f"✅ {phone} متصل")
+
+        # التحقق من القنوات
+        for ch in [main_channel, inquiry_channel, spam_channel]:
+            if ch:
+                try:
+                    await client.get_entity(ch)
+                    logging.info(f"📢 القناة {ch} متاحة")
+                except Exception as e:
+                    logging.warning(f"⚠️ لا يمكن الوصول للقناة {ch}: {e}")
+
+        @client.on(events.NewMessage)
+        async def handler(event):
+            if not running or not event.is_group:
+                return
+            if event.out:
+                return
+
+            # نقرأ الكلمات المفتاحية من الملف (كمرشح أولي)
+            targets = load_keywords()
+            msg_text = event.raw_text
+            msg_lower = msg_text.lower()
+
+            # إذا لم تحتوي الرسالة على أي كلمة من القائمة، نتجاهلها (توفير للموارد)
+            if targets and not any(kw.lower() in msg_lower for kw in targets):
+                return
+
+            chat = await event.get_chat()
+            chat_name = getattr(chat, 'title', 'غير معروف')
+            logging.info(f"🔍 رصد رسالة في '{chat_name}' بواسطة {phone}")
+
+            # التصنيف المتقدم
+            intent = "seeker"  # افتراضي
+            confidence = 50
+            reason = ""
+
+            if openrouter_cfg.get("enabled") and openrouter_cfg.get("api_key"):
+                # استخدام الذكاء الاصطناعي الخارجي
+                ai_result = await classify_with_openrouter(
+                    msg_text,
+                    openrouter_cfg["api_key"],
+                    openrouter_cfg.get("prompt", "قم بتصنيف الرسالة إلى seeker, inquiry, أو marketer.")
+                )
+                if ai_result:
+                    intent = ai_result.get("type", "seeker")
+                    confidence = ai_result.get("confidence", 50)
+                    reason = ai_result.get("reason", "")
+                    logging.info(f"🤖 AI: {intent} (ثقة {confidence}) - {reason}")
+            else:
+                # تصنيف محلي يعتمد على القواعد
+                local = classify_local(msg_text)
+                intent = local['type']
+                confidence = local['confidence']
+                reason = local['reason']
+                logging.info(f"📊 محلي: {intent} (ثقة {confidence}) - {reason}")
+
+            # اختيار القناة المستهدفة
+            target_channel = None
+            if intent == "marketer" and spam_channel:
+                target_channel = spam_channel
+                logging.info(f"📢 معلن -> قناة المعلنين")
+            elif intent == "inquiry" and inquiry_channel:
+                target_channel = inquiry_channel
+                logging.info(f"❓ استفسار -> قناة الاستفسارات")
+            elif intent == "seeker" and main_channel:
+                target_channel = main_channel
+                logging.info(f"✅ طالب -> القناة الرئيسية")
+            else:
+                # إذا لم توجد القناة المناسبة، نرسل للقناة الرئيسية إن وجدت
+                target_channel = main_channel or inquiry_channel or spam_channel
+                logging.warning(f"⚠️ لم تحدد القناة المناسبة، نرسل إلى أول قناة متاحة")
+
+            if not target_channel:
+                logging.warning(f"⚠️ لا توجد قناة محددة للحساب {phone}")
+                return
+
+            # جمع معلومات المرسل والمجموعة
+            sender = await event.get_sender()
+            sender_name = getattr(sender, 'first_name', '') or ''
+            if getattr(sender, 'last_name', None):
+                sender_name += f" {sender.last_name}"
+            sender_name = sender_name.strip() or "غير معروف"
+            sender_username = getattr(sender, 'username', None)
+            sender_id = sender.id
+            if sender_username:
+                sender_link = f"https://t.me/{sender_username}"
+            else:
+                sender_link = f"tg://user?id={sender_id}"
+
+            chat_username = getattr(chat, 'username', None)
+            chat_id = chat.id
+            if chat_username:
+                chat_link = f"https://t.me/{chat_username}"
+            else:
+                chat_link = f"https://t.me/c/{chat_id}/{event.id}"
+
+            # بناء الإشعار (مع إضافة التصنيف)
+            info = (
+                f"🚨 **رادار ذكي - تصنيف: {intent}**\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"📝 النص الأصلي: {msg_text}\n"
+                f"👤 المرسل: {sender_name} - [رابط]({sender_link})\n"
+                f"🏢 المجموعة: {chat_name} - [رابط]({chat_link})\n"
+                f"👤 الحساب الراصد: {phone}\n"
+                f"🤖 التصنيف: {intent} (ثقة {confidence}%)\n"
+                f"📊 السبب: {reason}\n"
+                f"━━━━━━━━━━━━━━━━━━━"
+            )
+
+            try:
+                dest = await client.get_entity(target_channel)
+                # محاولة إعادة التوجيه
+                try:
+                    await client.forward_messages(dest, event.message)
+                    await client.send_message(dest, info)
+                    logging.info(f"📤 تم إرسال التنبيه (إعادة توجيه) إلى {target_channel}")
+                except errors.ChatForwardsRestrictedError:
+                    # إذا منع التحويل، نرسل نسخة مع التذييل
+                    full_msg = f"{msg_text}\n\n{info}"
+                    if event.message.media:
+                        await client.send_file(dest, event.message.media, caption=full_msg)
+                    else:
+                        await client.send_message(dest, full_msg)
+                    logging.info(f"📤 تم إرسال التنبيه (نسخة) إلى {target_channel}")
+                except errors.FloodWaitError as e:
+                    logging.warning(f"⏳ Flood wait {e.seconds} ثانية، انتظار...")
+                    await asyncio.sleep(e.seconds)
+                except Exception as e:
+                    logging.error(f"❌ فشل إرسال التنبيه: {e}")
+            except Exception as e:
+                logging.error(f"❌ فشل الحصول على كيان القناة المستهدفة {target_channel}: {e}")
+
+        await client.run_until_disconnected()
+    except errors.FloodWaitError as e:
+        logging.warning(f"⏳ Flood wait للحساب {phone}: {e.seconds} ثانية، انتظار...")
+        await asyncio.sleep(e.seconds)
+    except Exception as e:
+        logging.error(f"خطأ في حساب {phone}: {e}")
+    finally:
+        await client.disconnect()
+        if client in clients:
+            clients.remove(client)
+
+# -------------------- دوال تحميل/حفظ الإعدادات (مثل السابق) --------------------
 def load_config():
     global accounts
     if os.path.exists(CONFIG_FILE):
@@ -64,121 +500,18 @@ def load_keywords():
             keywords = [line.strip() for line in f if line.strip()]
             if keywords:
                 return keywords
-    # قائمة افتراضية موسعة جداً
+    # قائمة افتراضية موسعة
     default_keywords = [
-        'مساعدة', 'ساعدوني', 'ساعدني', 'ساعد', 'ساعدنا', 'ساعدو', 'ساعديني',
-        'أبي أحد', 'أبي حد', 'أبي مساعدة', 'أبغى أحد', 'أبغى حد', 'أبغى مساعدة',
-        'محتاج', 'محتاجة', 'محوج', 'محوجة', 'ضروري', 'مستعجل', 'مستعجلة',
-        'أرجوكم', 'لو سمحتم', 'الله يجزاكم خير', 'بيض الله وجهكم', 'مشكورين',
-        'يعطيكم العافية', 'الرجاء المساعدة', 'تحتاج مساعدة', 'نحتاج مساعدة',
-        'يحتاج مساعدة', 'عندي مشكلة', 'عندي سؤال', 'عندي استفسار',
-        'أبي استفسار', 'أبي حل', 'بليييز', 'بليز', 'please', 'plz', 'help',
-        'need help', 'urgent', 'help me',
-        'واجب', 'واجبات', 'تكليف', 'تكاليف', 'تكليفات', 'تكاليفي', 'واجبي', 'واجباتي',
-        'حل', 'يحل', 'يخل', 'اسايمنت', 'assignment', 'homework', 'أسايمنت',
-        'اسايمن', 'اسايم', 'حل واجب', 'حل الواجب', 'حل التكليف', 'حل التكاليف',
-        'حل أسايمنت', 'حل assignment', 'تصحيح واجب', 'تصحيح اسايمنت',
-        'مساعدة في الواجب', 'مساعدة في الاسايمنت', 'تسليم واجب', 'تسليم تكليف',
-        'تأخير واجب', 'مهلة واجب',
-        'بحث', 'بحوث', 'تقرير', 'تقارير', 'ريبورت', 'report', 'research',
-        'بحثي', 'تقريري', 'دراسة', 'دراسة حالة', 'case study', 'رسالة', 'رسائل',
-        'أطروحة', 'thesis', 'إعداد بحث', 'كتابة بحث', 'عمل بحث', 'عمل تقرير',
-        'إعداد تقرير', 'كتابة تقرير', 'تحضير بحث', 'مصادر بحث', 'مراجع بحث',
-        'مساعدة في البحث', 'مساعدة في التقرير', 'مناقشة بحث', 'خطة بحث',
-        'خطة دراسة', 'مقترح بحث', 'proposal', 'بحث علمي', 'paper', 'ورقة بحثية',
-        'مشروع', 'مشاريع', 'بروجكت', 'project', 'بروجيكت', 'بروجكتي', 'مشروعي',
-        'مشروع تخرج', 'مشاريع تخرج', 'مشروع التخرج', 'مشاريع التخرج',
-        'مشروع نهائي', 'خطة مشروع', 'إعداد مشروع', 'تنفيذ مشروع',
-        'مساعدة في المشروع', 'مناقشة مشروع', 'مشروع برمجة', 'مشروع هندسي',
-        'مشروع تصميم', 'مشروع بحثي',
-        'برزنتيشن', 'presentation', 'بوربوينت', 'powerpoint', 'عرض', 'عروض',
-        'عرضي', 'تصميم', 'تصاميم', 'تصميمي', 'بوستر', 'poster', 'برشور', 'brochure',
-        'انفوجرافيك', 'infographic', 'خريطة ذهنية', 'mind map', 'شريحة', 'شرائح',
-        'عرض تقديمي', 'عروض تقديمية', 'تصميم بوربوينت', 'تصميم عرض',
-        'تصميم بوستر', 'تصميم برشور', 'تصميم انفوجرافيك', 'غلاف بحث', 'غلاف تقرير',
-        'تنسيق عرض', 'تحسين عرض',
-        'فيديو', 'فيديوهات', 'مونتاج', 'مقطع', 'تصوير', 'تحرير', 'انميشن', 'animation',
-        'موشن جرافيك', 'motion graphic', 'فيديو تعليمي', 'فيديو شرح', 'مقطع فيديو',
-        'تصميم فيديو', 'إخراج فيديو', 'إنتاج فيديو', 'تحرير فيديو', 'مونتاج فيديو',
-        'اختبار', 'اختبارات', 'كويز', 'كويزات', 'فاينل', 'ميد', 'امتحان', 'امتحانات',
-        'اختبار نهائي', 'اختبار منتصف', 'كويز نهائي', 'كويز منتصف',
-        'امتحان نهائي', 'امتحان منتصف', 'حل اختبار', 'حل امتحان', 'حل كويз',
-        'مساعدة في الاختبار', 'مراجعة اختبار', 'أسئلة اختبار', 'نماذج اختبارات',
-        'تجميعات اختبارات', 'أسئلة سنوات سابقة',
-        'شرح', 'يشرح', 'شرحي', 'درس', 'دروس', 'دروسي', 'ملخص', 'ملخصات', 'ملخصي',
-        'مذكرة', 'مذكرات', 'أساسيات', 'تمارين', 'تدريبات', 'فهم', 'استيعاب', 'تبسيط',
-        'شرح درس', 'شرح مادة', 'شرح موضوع', 'دروس خصوصية', 'دروس تقوية',
-        'حصة خصوصية', 'تلخيص مادة', 'تلخيص كتاب', 'تلخيص درس', 'تبسيط مادة', 'تأسيس',
-        'مراجعة', 'مراجعة ليلة الامتحان', 'مراجعة نهائية', 'مراجعة سريعة',
-        'رياضيات', 'فيزياء', 'كيمياء', 'أحياء', 'إنجليزي', 'عربي', 'تاريخ', 'جغرافيا',
-        'فلسفة', 'منطق', 'قانون', 'محاسبة', 'اقتصاد', 'إدارة', 'تسويق', 'برمجة',
-        'علوم حاسب', 'هندسة', 'طب', 'صيدلة', 'تمريض', 'حقوق', 'علوم سياسية', 'إعلام',
-        'لغات', 'ترجمة', 'أدب', 'نحو', 'صرف', 'بلاغة', 'فقه', 'حديث', 'تفسير',
-        'رياضيات بحتة', 'رياضيات تطبيقية', 'فيزياء عامة', 'فيزياء نووية',
-        'كيمياء عضوية', 'كيمياء تحليلية', 'أحياء دقيقة', 'أحياء جزيئية',
-        'تشريح', 'فسيولوجيا', 'صيدلانيات', 'مبادىء محاسبة', 'محاسبة مالية',
-        'محاسبة تكاليف', 'تدقيق', 'اقتصاد كلي', 'اقتصاد جزئي', 'إدارة أعمال',
-        'تسويق إلكتروني', 'برمجة بايثون', 'برمجة جافا', 'برمجة سي', 'قواعد بيانات',
-        'شبكات', 'ذكاء اصطناعي', 'تعلم آلة',
-        'دكتور خصوصي', 'مدرس خصوصي', 'معلم خصوصي', 'مدرسة خصوصية', 'تدريس خصوصي',
-        'شرح خصوصي', 'يشرح خصوصي', 'معيد', 'متخصص', 'أستاذ خصوصي',
-        'مدرس خصوصي رياضيات', 'مدرس خصوصي فيزياء', 'مدرس خصوصي كيمياء',
-        'مدرس خصوصي إنجليزي', 'تدريس منزلي', 'تدريس أونلاين',
-        'تعرفون أحد', 'تعرفون حد', 'من يعرف', 'من تعرف', 'أحد يعرف', 'حد يعرف',
-        'وين ألقى', 'كيف ألقى', 'كيف أحصل', 'مصدر', 'مرجع', 'مصادر', 'مراجع',
-        'عندكم فكرة', 'أحد عنده خبرة', 'من جرب', 'تجربة', 'نصيحة', 'توجيه', 'إرشاد',
-        'تعرفون مكان', 'تعرفون موقع', 'تعرفون قناة', 'تعرفون مجموعة',
-        'تلخيص', 'صياغة', 'كتابة', 'إعداد', 'تنفيذ', 'استشارة', 'تصحيح', 'نسخ', 'تنسيق',
-        'ترجمة نص', 'تدقيق لغوي', 'صياغة قانونية', 'كتابة مقال', 'إعداد خطة',
-        'استشارة قانونية', 'استشارة هندسية', 'استشارة طبية', 'مراجعة بحث',
-        'مراجعة مشروع', 'تصحيح أخطاء', 'تحرير نص', 'تنسيق رسالة',
-        'ليالي الامتحان', 'أسئلة', 'إجابات', 'نماذج', 'تجميعات', 'شروحات',
-        'حفظ', 'تذكر', 'تطبيق', 'تدريب', 'تجميعات أسئلة', 'شروحات فيديو',
-        'دروس أونلاين', 'كورسات', 'دورات', 'تدريب عملي',
-        'رسالة ماجستير', 'رسالة دكتوراه', 'نشر', 'مؤتمر', 'مجلة علمية', 'تحكيم',
-        'نشر علمي', 'إعداد رسالة ماجستير', 'كتابة أطروحة', 'نشر بحث',
-        'مؤتمر علمي', 'مجلة محكمة',
-        'كود', 'برنامج', 'موقع', 'نظام', 'قاعدة بيانات', 'خوارزمية', 'هيكل بيانات',
-        'واجهة', 'debug', 'troubleshooting', 'تطوير موقع', 'تطوير تطبيق',
-        'تصميم واجهات', 'اختبار برمجيات', 'حل مشكلة برمجية', 'مساعدة في الكود',
-        'مشروع ويب', 'تطبيق موبايل', 'تطبيق أندرويد', 'تطبيق iOS',
-        'رسم', 'أوتوكاد', 'سوليدوركس', 'ريفيت', 'ديزاين', 'تصميم معماري', 'إنشائي',
-        'ميكانيكي', 'كهربائي', 'civil', 'mechanical', 'electrical', 'خرائط',
-        'مخططات', 'رسومات هندسية', 'تصميم داخلي', 'مخططات هندسية', 'لوحات هندسية',
-        'نمذجة', 'نحت', 'تصميم منتج', 'تصميم أثاث',
-        'فوتوشوب', 'إليستريتور', 'ان ديزاين', 'جرافيك', 'graphic design',
-        'تصميم جرافيكي', 'شعار', 'logo', 'هوية', 'identity', 'براند', 'brand',
-        'هوية بصرية', 'براندينغ', 'تصميم شعار', 'تصميم إعلانات',
-        'تصميم مطبوعات', 'تصميم تجربة مستخدم', 'تصميم منشورات',
-        'تصميم سوشيال ميديا', 'تصميم بوستات', 'تصميم بانرات',
-        'ترجمة لغة', 'ترجمة إنجليزي', 'ترجمة عربي', 'ترجمة علمية',
-        'ترجمة أدبية', 'تلخيص مقال', 'ترجمة وثائق', 'ترجمة أبحاث',
-        'تدقيق نحوي', 'تحرير أكاديمي', 'مراجعة ترجمة',
-        'أحد يساعد', 'أحد يحل', 'أحد يشرح', 'أحد يعمل', 'أحد يسوي',
-        'أحد يصمم', 'أحد يبرمج', 'أحد يترجم', 'أحد يلخص', 'أحد يدقق', 'أحد يراجع',
-        'اللي عنده خبرة', 'اللي يقدر يساعد', 'اللي يعرف', 'اللي عنده فكرة',
-        'فيه أحد', 'هل من مساعد', 'يوجد مساعدة', 'أحتاج مساعدة في', 'أحتاج حل',
-        'أحتاج شرح', 'أحتاج مشروع',
-        'ابي احد', 'ابي حد', 'ابي مساعدة', 'ابغى احد', 'ابغى حد', 'ابغى مساعدة',
-        'تعرفون احد', 'من يعرف احد', 'من يعرف حد', 'احد عنده', 'حد عنده',
-        'عندكم', 'فيكم', 'تقدرون', 'تكفون', 'يا جماعة', 'يا شباب', 'يا بنات',
-        'نبي', 'نبغى', 'تبي', 'تبغى', 'يبي', 'يبغى', 'نبي احد', 'نبغى احد',
-        'عندك خبرة', 'عندك فكرة', 'تعرف احد', 'تعرف حد', 'من عنده', 'من عندها',
-        'please help', 'assignment help', 'homework help', 'research help',
-        'project help', 'essay', 'dissertation', 'lab report', 'coding help',
-        'programming help', 'exam help', 'quiz help', 'test help',
-        'tutor', 'private tutor', 'online tutor', 'explain', 'explanation',
-        'summary', 'summary help', 'translation', 'design help',
-        'presentation help', 'powerpoint help', 'edit', 'proofread',
-        'کمک', 'راهنمایی', 'پروژه', 'تکلیف', 'تحقیق', 'کوئیز',
-        'استاد خصوصی', 'معلم خصوصی', 'ترجمه', 'خلاصه',
-        'مدد', 'کام', 'پروجیکٹ', 'اسائنمنٹ', 'ہوم ورک', 'ریسرچ',
-        'رپورٹ', 'پرائیویٹ ٹیوٹر', 'ترجمہ', 'تلخیص',
-        'عاجل', 'هام', 'ضروري جدا', 'يسعدكم ربي', 'يا ليت', 'لو تكرمتم',
-        'الرجاء', 'نأمل مساعدتكم', 'نرجو المساعدة', 'نحتاج دعم',
-        'نطلب مساعدة', 'نستفسر عن'
+        'مساعدة', 'ساعدوني', 'ساعدني', 'أبي أحد', 'أبي حد', 'أبي مساعدة',
+        'محتاج', 'محتاجة', 'ضروري', 'واجب', 'واجبات', 'تكليف', 'تكاليف',
+        'بحث', 'بحوث', 'تقرير', 'تقارير', 'مشروع', 'مشاريع', 'بروجكت',
+        'برزنتيشن', 'عرض', 'تصميم', 'فيديو', 'اختبار', 'كويز', 'امتحان',
+        'شرح', 'يشرح', 'درس', 'ملخص', 'دروس خصوصية', 'تعرفون أحد', 'تعرفون حد',
+        'من يعرف', 'من تعرف', 'أحد يعرف', 'حد يعرف', 'وين ألقى', 'كيف ألقى',
+        'ترجمة', 'تلخيص', 'تدقيق', 'كتابة', 'إعداد', 'حل', 'يحل', 'يسوي',
+        'ابي', 'ابغى', 'تعرفون', 'خصوصي', 'مدرس خصوصي', 'دكتور خصوصي',
+        'كويزات', 'اختبارات', 'فاينل', 'ميد', 'نشر', 'رسالة', 'ماجستير',
     ]
-    # حفظ الكلمات الافتراضية في الملف
     save_keywords(default_keywords)
     return default_keywords
 
@@ -186,237 +519,10 @@ def save_keywords(keywords_list):
     with open(KEYWORDS_FILE, 'w', encoding='utf-8') as f:
         f.write("\n".join(keywords_list))
 
-# -------------------- دوال التصنيف بـ OpenRouter --------------------
-async def classify_with_openrouter(text, api_key, prompt_template):
-    try:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        # تحسين الـ prompt ليكون أكثر دقة
-        enhanced_prompt = prompt_template + """
-
-معايير إضافية:
-- **طالب (seeker)**: يستخدم كلمات مثل "أحتاج", "أريد", "كيف", "هل يوجد", "أبي أحد", "تعرفون". يطلب شرحًا، حلاً، بحثًا، مشروعًا، ترجمة. لا يحتوي على روابط دعائية أو قوائم خدمات.
-- **معلن (marketer)**: يحتوي على كلمات مثل "نقدم", "خدمات", "عروض", "للتواصل", "خصم", "احترافي". قد يحتوي على قوائم منقطة، رموز ترويجية (⭐ ✅ ═════)، روابط واتساب أو تليجرام، أو إعلانات مكررة.
-أعد JSON فقط بالشكل: {"type": "seeker" أو "marketer", "confidence": 0-100, "reason": "السبب"}
-"""
-        data = {
-            "model": "qwen/qwen3-vl-30b-a3b-thinking",
-            "messages": [
-                {"role": "system", "content": enhanced_prompt},
-                {"role": "user", "content": text}
-            ]
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://openrouter.ai/api/v1/chat/completions",
-                                    headers=headers, json=data) as resp:
-                if resp.status != 200:
-                    logging.error(f"OpenRouter returned {resp.status}")
-                    return None
-                result = await resp.json()
-                content = result["choices"][0]["message"]["content"]
-                json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                if json_match:
-                    return json.loads(json_match.group())
-    except Exception as e:
-        logging.error(f"OpenRouter error: {e}")
-    return None
-
-# -------------------- دوال التحقق (Code & Password) --------------------
-async def get_verification_code(phone):
-    """تطلب رمز التحقق وتنتظر إدخاله من لوحة التحكم"""
-    future = asyncio.Future()
-    verification_requests[phone] = {"future": future, "type": "code"}
-    logging.info(f"📱 طلب رمز تحقق للحساب {phone}")
-    return await future
-
-async def get_verification_password(phone):
-    """تطلب كلمة المرور للتحقق بخطوتين"""
-    future = asyncio.Future()
-    verification_requests[phone] = {"future": future, "type": "password"}
-    logging.info(f"🔐 طلب كلمة مرور للتحقق بخطوتين للحساب {phone}")
-    return await future
-
-# -------------------- دالة مراقبة حساب واحد --------------------
-async def monitor_account(acc, openrouter_cfg):
-    phone = acc['phone']
-    api_id = acc['api_id']
-    api_hash = acc['api_hash']
-    alert_group = acc.get('alert_group', '')
-
-    session_name = f"session_{re.sub(r'\D', '', phone)}"
-    session_path = os.path.join(BASE_DIR, session_name)
-    client = TelegramClient(session_path, api_id, api_hash)
-    clients.append(client)
-
-    try:
-        await client.connect()
-        if not await client.is_user_authorized():
-            await client.send_code_request(phone)
-            code = await get_verification_code(phone)
-            try:
-                await client.sign_in(phone, code)
-            except Exception as e:
-                if "password" in str(e).lower() or "2fa" in str(e).lower():
-                    password = await get_verification_password(phone)
-                    await client.sign_in(password=password)
-                else:
-                    raise e
-
-        logging.info(f"✅ {phone} متصل")
-
-        if alert_group:
-            try:
-                await client.get_entity(alert_group)
-                logging.info(f"📢 مجموعة الإشعارات {alert_group} متاحة")
-            except Exception as e:
-                logging.warning(f"⚠️ لا يمكن الوصول لمجموعة الإشعارات {alert_group}: {e}")
-
-        @client.on(events.NewMessage)
-        async def handler(event):
-            if not running or not event.is_group:
-                return
-            if event.out:
-                return
-
-            targets = load_keywords()
-            if not targets:
-                return
-
-            msg_text = event.raw_text
-            msg_lower = msg_text.lower()
-
-            for kw in targets:
-                if kw.lower() in msg_lower:
-                    chat = await event.get_chat()
-                    chat_name = getattr(chat, 'title', 'غير معروف')
-                    logging.info(f"🔍 رصد كلمة '{kw}' في '{chat_name}' بواسطة {phone}")
-
-                    sender_type = None
-                    confidence = 0
-                    if openrouter_cfg.get("enabled") and openrouter_cfg.get("api_key"):
-                        ai_result = await classify_with_openrouter(
-                            msg_text,
-                            openrouter_cfg["api_key"],
-                            openrouter_cfg.get("prompt", "قم بتحليل الرسالة وتحديد ما إذا كان المرسل مسوقاً أو باحثاً.")
-                        )
-                        if ai_result:
-                            sender_type = ai_result.get("type")
-                            confidence = ai_result.get("confidence", 0)
-                            reason = ai_result.get("reason", "")
-                            logging.info(f"🤖 الذكاء الاصطناعي: {sender_type} (ثقة {confidence}%) - {reason}")
-                            if sender_type == "marketer" and confidence > 60:
-                                logging.info(f"🚫 تم تجاهل رسالة معلن (ثقة {confidence}%)")
-                                return
-
-                    # جمع معلومات المرسل والمجموعة
-                    sender = await event.get_sender()
-                    sender_name = getattr(sender, 'first_name', '') or ''
-                    if getattr(sender, 'last_name', None):
-                        sender_name += f" {sender.last_name}"
-                    sender_name = sender_name.strip() or "غير معروف"
-                    sender_username = getattr(sender, 'username', None)
-                    sender_id = sender.id
-                    if sender_username:
-                        sender_link = f"https://t.me/{sender_username}"
-                    else:
-                        sender_link = f"tg://user?id={sender_id}"
-
-                    chat_username = getattr(chat, 'username', None)
-                    chat_id = chat.id
-                    if chat_username:
-                        chat_link = f"https://t.me/{chat_username}"
-                    else:
-                        chat_link = f"https://t.me/c/{chat_id}/{event.id}"
-
-                    # بناء الإشعار
-                    info = (
-                        f"🚨 **رادار ذكي - طلب مساعدة**\n"
-                        f"━━━━━━━━━━━━━━━━━━━\n"
-                        f"🔍 الكلمة: {kw}\n"
-                        f"📝 النص الأصلي: {msg_text}\n"
-                        f"👤 المرسل: {sender_name} - [رابط]({sender_link})\n"
-                        f"🏢 المجموعة: {chat_name} - [رابط]({chat_link})\n"
-                        f"👤 الحساب الراصد: {phone}\n"
-                    )
-                    if sender_type:
-                        info += f"🤖 تصنيف الذكاء: {sender_type} (ثقة {confidence}%)\n"
-                    info += "━━━━━━━━━━━━━━━━━━━"
-
-                    if alert_group:
-                        try:
-                            dest = await client.get_entity(alert_group)
-                            # محاولة إعادة التوجيه
-                            try:
-                                await client.forward_messages(dest, event.message)
-                                await client.send_message(dest, info)
-                                logging.info(f"📤 تم إرسال التنبيه (إعادة توجيه)")
-                            except errors.ChatForwardsRestrictedError:
-                                # إذا منع التحويل، نرسل نسخة مع التذييل
-                                full_msg = f"{msg_text}\n\n{info}"
-                                if event.message.media:
-                                    await client.send_file(dest, event.message.media, caption=full_msg)
-                                else:
-                                    await client.send_message(dest, full_msg)
-                                logging.info(f"📤 تم إرسال التنبيه (نسخة)")
-                            except errors.FloodWaitError as e:
-                                logging.warning(f"⏳ Flood wait {e.seconds} ثانية، انتظار...")
-                                await asyncio.sleep(e.seconds)
-                                # إعادة المحاولة بعد الانتظار (يمكن إعادة الاستدعاء أو تركها)
-                            except Exception as e:
-                                logging.error(f"❌ فشل إرسال التنبيه: {e}")
-                        except Exception as e:
-                            logging.error(f"❌ فشل الحصول على كيان المجموعة المستهدفة: {e}")
-                    break
-
-        await client.run_until_disconnected()
-    except errors.FloodWaitError as e:
-        logging.warning(f"⏳ Flood wait للحساب {phone}: {e.seconds} ثانية، انتظار...")
-        await asyncio.sleep(e.seconds)
-    except Exception as e:
-        logging.error(f"خطأ في حساب {phone}: {e}")
-    finally:
-        await client.disconnect()
-        if client in clients:
-            clients.remove(client)
-
-# -------------------- دالة تشغيل الرادار --------------------
-async def run_radar():
-    global running
-    config = load_config()
-    acc_list = config.get("accounts", [])
-    openrouter_cfg = config.get("openrouter", {})
-    if not acc_list:
-        logging.error("لا توجد حسابات للتشغيل")
-        return
-    logging.info(f"🚀 بدء الرادار بعدد {len(acc_list)} حسابات")
-    tasks = [monitor_account(acc, openrouter_cfg) for acc in acc_list]
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-def start_radar_async():
-    global loop, radar_thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(run_radar())
-
-def stop_radar():
-    global running, clients, loop
-    running = False
-    for client in clients:
-        try:
-            if loop and loop.is_running():
-                asyncio.run_coroutine_threadsafe(client.disconnect(), loop)
-        except:
-            pass
-    clients.clear()
-    logging.info("🛑 تم إيقاف الرادار")
-
 # -------------------- تطبيق Flask --------------------
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
 
-# قالب HTML المدمج (كما هو مع إضافة زر لتحديث السجل)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html dir="rtl" lang="ar">
@@ -459,7 +565,7 @@ HTML_TEMPLATE = """
         <div id="codeModal" class="modal">
             <div class="modal-content">
                 <span class="close" onclick="closeCodeModal()">&times;</span>
-                <h3 id="codeTitle">🔐 إدخال رمز التحقق</h3>
+                <h3>🔐 إدخال رمز التحقق</h3>
                 <p id="codePhone"></p>
                 <input type="text" id="codeInput" placeholder="أدخل الرمز المرسل إلى تليجرام" style="width:100%; padding:10px; margin:10px 0;">
                 <button onclick="submitCode()" style="width:100%;">إرسال الرمز</button>
@@ -504,8 +610,14 @@ HTML_TEMPLATE = """
                 <label>API Hash</label>
                 <input type="text" name="api_hash" required>
                 
-                <label>رابط مجموعة الإشعارات (اختياري)</label>
-                <input type="text" name="alert_group" placeholder="https://t.me/...">
+                <label>القناة الرئيسية (للطلاب)</label>
+                <input type="text" name="main_channel" placeholder="https://t.me/...">
+                
+                <label>قناة الاستفسارات (للأسئلة العامة)</label>
+                <input type="text" name="inquiry_channel" placeholder="https://t.me/...">
+                
+                <label>قناة المعلنين (للإعلانات)</label>
+                <input type="text" name="spam_channel" placeholder="https://t.me/...">
                 
                 <button type="submit">💾 إضافة الحساب</button>
             </form>
@@ -516,13 +628,17 @@ HTML_TEMPLATE = """
             <table>
                 <tr>
                     <th>رقم الهاتف</th>
-                    <th>مجموعة الإشعارات</th>
+                    <th>القناة الرئيسية</th>
+                    <th>قناة الاستفسارات</th>
+                    <th>قناة المعلنين</th>
                     <th>الإجراءات</th>
                 </tr>
                 {% for acc in accounts %}
                 <tr>
                     <td>{{ acc.phone }}</td>
-                    <td>{{ acc.alert_group if acc.alert_group else 'غير محدد' }}</td>
+                    <td>{{ acc.main_channel or 'غير محدد' }}</td>
+                    <td>{{ acc.inquiry_channel or 'غير محدد' }}</td>
+                    <td>{{ acc.spam_channel or 'غير محدد' }}</td>
                     <td>
                         <form action="/delete_account" method="post" style="display:inline;">
                             <input type="hidden" name="phone" value="{{ acc.phone }}">
@@ -535,7 +651,7 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="card">
-            <h2>🔑 الكلمات المفتاحية</h2>
+            <h2>🔑 الكلمات المفتاحية (للفلترة الأولية)</h2>
             <form action="/save_keywords" method="post">
                 <textarea name="keywords" rows="8" placeholder="كلمة في كل سطر">{{ keywords | join('\n') }}</textarea>
                 <button type="submit">💾 حفظ الكلمات</button>
@@ -545,14 +661,14 @@ HTML_TEMPLATE = """
         <div class="card">
             <h2>🤖 إعدادات OpenRouter (التصنيف الذكي)</h2>
             <form action="/save_openrouter" method="post">
-                <label>مفتاح API (اتركه فارغاً لتعطيل التصنيف)</label>
+                <label>مفتاح API (اتركه فارغاً لتعطيل التصنيف الخارجي)</label>
                 <input type="text" name="api_key" value="{{ openrouter.api_key }}">
                 
                 <label>تعليمات التصنيف (prompt)</label>
                 <textarea name="prompt" rows="5">{{ openrouter.prompt }}</textarea>
                 
                 <label>
-                    <input type="checkbox" name="enabled" {% if openrouter.enabled %}checked{% endif %}> تفعيل التصنيف الذكي
+                    <input type="checkbox" name="enabled" {% if openrouter.enabled %}checked{% endif %}> تفعيل التصنيف الخارجي (إذا لم يفعل، سيتم استخدام التصنيف المحلي)
                 </label>
                 
                 <button type="submit">💾 حفظ إعدادات OpenRouter</button>
@@ -663,7 +779,7 @@ def submit_password():
 def index():
     config = load_config()
     accounts_list = config.get("accounts", [])
-    openrouter_cfg = config.get("openrouter", {"api_key": "", "enabled": False, "prompt": ""})
+    openrouter_cfg = config.get("openrouter", {"api_key": "", "enabled": False, "prompt": "قم بتصنيف الرسالة إلى seeker, inquiry, أو marketer."})
     keywords_list = load_keywords()
     
     log_content = ""
@@ -686,7 +802,9 @@ def add_account():
     phone = request.form.get('phone', '').strip()
     api_id = request.form.get('api_id', '').strip()
     api_hash = request.form.get('api_hash', '').strip()
-    alert_group = request.form.get('alert_group', '').strip()
+    main_channel = request.form.get('main_channel', '').strip()
+    inquiry_channel = request.form.get('inquiry_channel', '').strip()
+    spam_channel = request.form.get('spam_channel', '').strip()
     
     if not phone or not api_id or not api_hash:
         return "جميع الحقول مطلوبة", 400
@@ -700,7 +818,9 @@ def add_account():
         "phone": phone,
         "api_id": int(api_id),
         "api_hash": api_hash,
-        "alert_group": alert_group
+        "main_channel": main_channel,
+        "inquiry_channel": inquiry_channel,
+        "spam_channel": spam_channel
     })
     save_config(accounts_list, config.get("openrouter", {}))
     return redirect(url_for('index'))
@@ -756,12 +876,42 @@ def get_log():
             return "".join(lines[-100:])
     return ""
 
+# -------------------- دالة تشغيل الرادار --------------------
+async def run_radar():
+    global running
+    config = load_config()
+    acc_list = config.get("accounts", [])
+    openrouter_cfg = config.get("openrouter", {})
+    if not acc_list:
+        logging.error("لا توجد حسابات للتشغيل")
+        return
+    logging.info(f"🚀 بدء الرادار بعدد {len(acc_list)} حسابات")
+    tasks = [monitor_account(acc, openrouter_cfg) for acc in acc_list]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+def start_radar_async():
+    global loop, radar_thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_radar())
+
+def stop_radar():
+    global running, clients, loop
+    running = False
+    for client in clients:
+        try:
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(client.disconnect(), loop)
+        except:
+            pass
+    clients.clear()
+    logging.info("🛑 تم إيقاف الرادار")
+
 if __name__ == '__main__':
-    # تأكد من وجود ملفات افتراضية
     if not os.path.exists(KEYWORDS_FILE):
-        save_keywords([])  # هذا سيؤدي إلى استخدام load_keywords التي تنشئ القائمة
+        save_keywords([])  # سيتم إنشاء القائمة الافتراضية في load_keywords
     if not os.path.exists(CONFIG_FILE):
-        save_config([], {"api_key": "", "enabled": False, "prompt": "قم بتحليل الرسالة وتحديد ما إذا كان المرسل مسوقاً أو باحثاً."})
+        save_config([], {"api_key": "", "enabled": False, "prompt": "قم بتصنيف الرسالة إلى seeker, inquiry, أو marketer."})
     
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
