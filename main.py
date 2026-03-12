@@ -5,6 +5,7 @@ import json
 import re
 import logging
 import threading
+import math
 from datetime import datetime
 from flask import Flask, render_template_string, request, redirect, url_for, jsonify, session
 from telethon import TelegramClient, events, errors
@@ -33,7 +34,49 @@ radar_thread = None
 
 verification_requests = {}  # phone -> {"future": asyncio.Future, "type": "code" or "password"}
 
+# -------------------- قاموس عربي بسيط للجذور (اختياري) --------------------
+# يمكن توسيعه لكنه هنا للتوضيح
+ARABIC_STEMS = {
+    'كتب': 'كتب', 'يكتب': 'كتب', 'اكتب': 'كتب', 'كتابة': 'كتب',
+    'قال': 'قول', 'يقول': 'قول', 'قل': 'قول', 'قولة': 'قول',
+    'عمل': 'عمل', 'يعمل': 'عمل', 'اعمل': 'عمل', 'عاملة': 'عمل',
+    'ساعد': 'ساعد', 'يساعد': 'ساعد', 'مساعدة': 'ساعد', 'ساعود': 'ساعد',
+    'فهم': 'فهم', 'يفهم': 'فهم', 'افهم': 'فهم', 'فاهمة': 'فهم',
+    'شرح': 'شرح', 'يشرح': 'شرح', 'اشرح': 'شرح', 'شرحه': 'شرح',
+    'حل': 'حل', 'يحل': 'حل', 'حلول': 'حل', 'محلول': 'حل',
+    'قرأ': 'قرأ', 'يقرأ': 'قرأ', 'قراءة': 'قرأ', 'قارئ': 'قرأ',
+    'درس': 'درس', 'يدرس': 'درس', 'دراسة': 'درس', 'مدرس': 'درس',
+    'علم': 'علم', 'يعلم': 'علم', 'تعليم': 'علم', 'عالم': 'علم',
+    'طلب': 'طلب', 'يطلب': 'طلب', 'مطلوب': 'طلب', 'طلبات': 'طلب',
+    'بحث': 'بحث', 'يبحث': 'بحث', 'بحوث': 'بحث', 'باحث': 'بحث',
+    'نشر': 'نشر', 'ينشر': 'نشر', 'منشور': 'نشر', 'نشريات': 'نشر',
+    'ترجم': 'ترجم', 'يترجم': 'ترجم', 'ترجمة': 'ترجم', 'مترجم': 'ترجم',
+    'لخص': 'لخص', 'يلخص': 'لخص', 'تلخيص': 'لخص', 'ملخص': 'لخص',
+    'صمم': 'صمم', 'يصمم': 'صمم', 'تصميم': 'صمم', 'مصمم': 'صمم',
+    'برمج': 'برمج', 'يبرمج': 'برمج', 'برمجة': 'برمج', 'مبرمج': 'برمج',
+}
+
+def stem_word(word):
+    """تجذيع بسيط للكلمات العربية (يعيد الكلمة إذا لم يجد جذراً)"""
+    word = word.lower().strip()
+    # إذا كانت الكلمة موجودة في القاموس، أرجع الجذر
+    if word in ARABIC_STEMS:
+        return ARABIC_STEMS[word]
+    # محاولة إزالة بعض الحروف الزائدة (هذا مبسط جداً)
+    if len(word) > 4:
+        # إزالة ال التعريف
+        if word.startswith('ال'):
+            word = word[2:]
+        # إزالة تاء التأنيث
+        if word.endswith('ة'):
+            word = word[:-1] + 'ه'
+        # إزالة نون الجمع
+        if word.endswith('ون') or word.endswith('ين'):
+            word = word[:-2]
+    return word
+
 # -------------------- قوائم الميزات المميزة للمعلنين والطلاب (موسعة جداً) --------------------
+# تجميع الكلمات حسب الفئة مع استخدام الجذور لزيادة المرونة
 
 # كلمات مفتاحية تدل على أن المرسل طالب (يريد خدمة) - مع تنويعات الهمزات والعامية
 SEEKER_KEYWORDS = [
@@ -46,39 +89,71 @@ SEEKER_KEYWORDS = [
     # طلب شرح
     'يشرح', 'شرح', 'دروس خصوصية', 'درس خصوصي', 'خصوصي', 'مدرس خصوصي',
     'معلم خصوصي', 'دكتور خصوصي', 'يشرح لي', 'تشرح لي', 'يشرحلي', 'تشرحلي',
-    'يفهمني', 'تفهمني', 'يفهم', 'تفهم',
+    'يفهمني', 'تفهمني', 'يفهم', 'تفهم', 'فهمني', 'فهميني', 'اشرح لي', 'شرحلي',
+    'أبي شرح', 'أبغى شرح', 'نبي شرح', 'نبغى شرح', 'يحتاج شرح', 'تحتاج شرح',
 
     # طلب حل (واجبات، تكاليف، الخ)
     'يحل', 'حل', 'يخل', 'حل واجب', 'حل واجبات', 'حل التكليف', 'حل التكاليف',
     'حل اسايمنت', 'حل assignment', 'يسوي', 'يسوي لي', 'يسويلي', 'تسوي',
     'تسوي لي', 'تسويلي', 'يعمل', 'يعمل لي', 'يعملي', 'تعمل', 'تعمل لي',
-    'تعملي', 'ينفذ', 'ينفذ لي', 'ينفذلي',
+    'تعملي', 'ينفذ', 'ينفذ لي', 'ينفذلي', 'نفذ لي', 'نفذلي', 'اعمل لي', 'اعملي',
+    'سو لي', 'سولي', 'حل لي', 'حلي', 'أبي حل', 'أبغى حل', 'نبي حل', 'نبغى حل',
+    'محتاج حل', 'محتاج من يحل', 'محتاج من يسوي', 'محتاج من يعمل',
 
     # طلب كتابة/بحث/مشروع
     'يكتب', 'يكتب لي', 'يكتبلي', 'تكتب', 'تكتب لي', 'تكتبلي',
     'بحث', 'بحوث', 'تقرير', 'تقارير', 'مشروع', 'مشاريع', 'بروجكت',
     'ريبورت', 'report', 'research', 'paper', 'thesis', 'اطروحة',
     'سيرة ذاتية', 'cv', 'تصميم', 'تصاميم', 'بوستر', 'poster', 'برزنتيشن',
-    'presentation', 'بوربوينت', 'powerpoint',
+    'presentation', 'بوربوينت', 'powerpoint', 'انفوجرافيك', 'infographic',
+    'خريطة ذهنية', 'mind map', 'بحثي', 'مشروعي', 'تقريري', 'رسالتي',
+    'أبي بحث', 'أبغى بحث', 'نبي بحث', 'نبغى بحث', 'محتاج بحث', 'محتاج مشروع',
+    'محتاج تقرير', 'محتاج تصميم', 'محتاج بوستر', 'محتاج برزنتيشن',
 
     # طلب ترجمة/تلخيص
     'يترجم', 'يترجم لي', 'يترجملي', 'تترجم', 'تترجم لي', 'تترجملي',
     'ترجمة', 'يلخص', 'يلخص لي', 'يلخصلي', 'تلخيص', 'يدقق', 'يدقق لي',
     'يدققلي', 'تدقيق', 'تصحيح', 'يصحح', 'يصحح لي', 'يصححلي',
+    'أبي ترجمة', 'أبغى ترجمة', 'نبي ترجمة', 'نبغى ترجمة', 'محتاج ترجمة',
+    'محتاج تلخيص', 'محتاج تدقيق', 'محتاج تصحيح',
 
     # كلمات استفهام طلابية
     'كيف اسوي', 'كيف أعمل', 'كيف أذاكر', 'كيف أحل', 'وين ألقى', 'من وين',
-    'مصدر', 'مرجع', 'اللي عنده خبرة', 'اللي جرب', 'اللي يعرف',
+    'مصدر', 'مرجع', 'اللي عنده خبرة', 'اللي جرب', 'اللي يعرف', 'من جرب',
+    'هل فيه', 'هل في', 'هل أحد', 'هل حد',
 
     # كلمات خليجية وعامية متنوعة
     'ابي', 'ابغى', 'ودي', 'نبي', 'نبغى', 'تبي', 'تبغى', 'يبي', 'يبغى',
     'عندك', 'عندج', 'عندكم', 'فيكم', 'تقدرون', 'تكفون', 'يا جماعة',
     'يا شباب', 'يا بنات', 'يا اخوان', 'ياحلوين', 'الرجاء', 'لو سمحتم',
     'جزاكم الله خير', 'يعطيكم العافية', 'بيض الله وجهكم', 'يسعدكم ربي',
+    'ما قصرتوا', 'مشكورين', 'شكراً', 'شكرا', 'ممنون',
 
     # مساعدة في الاختبارات
     'كويز', 'اختبار', 'امتحان', 'فاينل', 'ميد', 'كويزات', 'اختبارات',
-    'مراجعة', 'ليلة الامتحان', 'اسئلة', 'نماذج', 'تجميعات',
+    'مراجعة', 'ليلة الامتحان', 'اسئلة', 'نماذج', 'تجميعات', 'أسئلة سنوات سابقة',
+    'اختبار نهائي', 'اختبار منتصف', 'امتحان نهائي', 'امتحان منتصف',
+    'حل اختبار', 'حل امتحان', 'حل كويز', 'مساعدة في الاختبار',
+
+    # كلمات تدل على الحاجة الملحة
+    'بكرا', 'باجر', 'بكرة', 'الصبح', 'الليل', 'اليوم', 'الليلة', 'ضروري جدا',
+    'عاجل', 'مهم', 'مستعجل', 'بسرعة', 'بأسرع وقت',
+
+    # استفسارات عن مدرسين/دورات
+    'دكتور', 'مدرس', 'معلم', 'استاذ', 'بروفيسور', 'محاضر', 'مدرب',
+    'دورة', 'كورس', 'تدريب', 'ورشة', 'حضوري', 'أونلاين', 'عن بعد',
+
+    # مواد دراسية
+    'رياضيات', 'فيزياء', 'كيمياء', 'أحياء', 'إنجليزي', 'عربي', 'تاريخ', 'جغرافيا',
+    'فلسفة', 'منطق', 'قانون', 'محاسبة', 'اقتصاد', 'إدارة', 'تسويق', 'برمجة',
+    'علوم حاسب', 'هندسة', 'طب', 'صيدلة', 'تمريض', 'حقوق', 'علوم سياسية', 'إعلام',
+    'لغات', 'ترجمة', 'أدب', 'نحو', 'صرف', 'بلاغة', 'فقه', 'حديث', 'تفسير',
+    'رياضيات بحتة', 'رياضيات تطبيقية', 'فيزياء عامة', 'فيزياء نووية',
+    'كيمياء عضوية', 'كيمياء تحليلية', 'أحياء دقيقة', 'أحياء جزيئية',
+    'تشريح', 'فسيولوجيا', 'صيدلانيات', 'مبادىء محاسبة', 'محاسبة مالية',
+    'محاسبة تكاليف', 'تدقيق', 'اقتصاد كلي', 'اقتصاد جزئي', 'إدارة أعمال',
+    'تسويق إلكتروني', 'برمجة بايثون', 'برمجة جافا', 'برمجة سي', 'قواعد بيانات',
+    'شبكات', 'ذكاء اصطناعي', 'تعلم آلة',
 ]
 
 # كلمات مفتاحية تدل على أن المرسل معلن (يقدم خدمات) - مع تنويعات
@@ -89,31 +164,37 @@ MARKETER_KEYWORDS = [
 
     # عروض وخصومات
     'عرض', 'عروض', 'خصم', 'تخفيض', 'حسم', 'لفترة محدودة', 'العرض ساري',
-    'بمناسبة', 'فرصة', 'خصم خاص', 'خصم 50', 'خصم 30',
+    'بمناسبة', 'فرصة', 'خصم خاص', 'خصم 50', 'خصم 30', 'خصم %', 'تخفيضات',
+    'عرض خاص', 'عرض حصري', 'عرض مميز', 'كوبون', 'كود خصم', 'توفير',
 
     # تواصل
     'للتواصل', 'راسلني', 'كلمني', 'تواصل', 'واتس', 'واتساب', 'wa.me',
-    't.me', 'تلجرام', 'تيليجرام', 'قناتي', 'بوت', 'رابط',
+    't.me', 'تلجرام', 'تيليجرام', 'قناتي', 'بوت', 'رابط', 'لينك',
+    'على الخاص', 'الخاص', 'خاص', 'الدردشة', 'المحادثة', 'راسل',
 
     # أسماء شركات/منصات
     'شركة', 'مؤسسة', 'أكاديمية', 'منصة', 'فريق', 'نخبة', 'خبراء',
-    'متخصصون', 'محترفون', 'مكتب', 'مركز',
+    'متخصصون', 'محترفون', 'مكتب', 'مركز', 'معمل', 'مختبر', 'مجموعة',
+    'جروب', 'قروب', 'تشكيلة', 'فريق عمل',
 
     # صياغات إعلانية
     'احترافي', 'ممتاز', 'أفضل', 'الأفضل', 'بجودة عالية', 'بدقة', 'بسرعة',
     'في الموعد', 'ضمان', 'ثقة', 'أمانة', 'نضمن لك', 'لسنا الوحيدون',
     'لكننا الأفضل', 'العدد محدود', 'باقي عدد', 'انضم', 'سارع', 'اغتنم',
-    'احجز', 'اشترك', 'عضوية', 'باقة',
+    'احجز', 'اشترك', 'عضوية', 'باقة', 'الفرصة', 'لا تفوت', 'اغتنم الفرصة',
+    'الحجز', 'الاشتراك', 'التسجيل', 'مقاعد محدودة', 'أماكن محدودة',
 
     # خدمات محددة (غالباً ما يذكرها المعلنون)
     'حل واجبات', 'حل واجب', 'بحوث', 'تقرير', 'تقارير', 'مشاريع', 'مشروع',
     'بروجكت', 'ترجمة', 'تلخيص', 'تحليل إحصائي', 'spss', 'تصميم', 'جرافيك',
     'سيرة ذاتية', 'بوستر', 'برزنتيشن', 'بوربوينت', 'أبحاث', 'رسائل',
-    'ماجستير', 'دكتوراه', 'ترقية', 'نشر علمي', 'مؤتمر',
+    'ماجستير', 'دكتوراه', 'ترقية', 'نشر علمي', 'مؤتمر', 'ورقة علمية',
+    'بحث علمي', 'رسالة ماجستير', 'رسالة دكتوراه', 'اطروحة', 'thesis',
+    'paper', 'scopus', 'ISI', 'Q1', 'Q2', 'معامل تأثير', 'تحكيم',
 
-    # روابط وأرقام
-    r'\+?\d{9,}',  # أرقام هواتف
-    r'@\w+',       # يوزرات تلجرام
+    # كلمات تدل على التكرار (علامات إعلانية)
+    '✅', '⭐', '🔥', '🎯', '💰', '💯', '✔️', '🔹', '🔸', '▪️', '▫️',
+    '🟢', '🔴', '🟡', '🟠', '🟣', '🟤', '⚫', '⚪',
 ]
 
 # كلمات استفسارية (غير واضحة النية)
@@ -122,10 +203,12 @@ INQUIRY_KEYWORDS = [
     'ماهي', 'كيف', 'كيفية', 'متى', 'وين', 'من وين', 'كم', 'كم سعر',
     'كم التكلفة', 'بكم', 'أحد جرب', 'من جرب', 'تجربة', 'نصيحة', 'رأيكم',
     'ش رايكم', 'شو رأيك', 'شفتو', 'تقرأ عن', 'تسمع عن', 'طريقة', 'كيفية',
-    'استفسار', 'سؤال', 'عندي سؤال', 'عندي استفسار',
+    'استفسار', 'سؤال', 'عندي سؤال', 'عندي استفسار', 'أبي استفسر', 'أبغى أسأل',
+    'ممكن أسأل', 'ممكن استفسر', 'اللي عنده معلومة', 'اللي يعرف يفيدني',
+    'هل صحيح', 'هل صحي', 'هل معروف', 'هل في أحد', 'هل فيه حد', 'هل يوجد',
 ]
 
-# دوال مساعدة للتصنيف المبني على القواعد
+# -------------------- دوال مساعدة للتصنيف المبني على القواعد --------------------
 
 def normalize_text(text):
     """تطبيع النص للتعامل مع التنوعات اللغوية (الهمزات، التاء المربوطة، الألف المقصورة)"""
@@ -134,15 +217,24 @@ def normalize_text(text):
     text = re.sub(r'[إأآا]', 'ا', text)
     text = re.sub(r'[ى]', 'ي', text)
     text = re.sub(r'[ة]', 'ه', text)
-    # إزالة الحركات (اختياري)
-    text = re.sub(r'[\u064B-\u0652]', '', text)  # إزالة الفتحة والضمة والكسرة
+    # إزالة الحركات
+    text = re.sub(r'[\u064B-\u0652]', '', text)
+    # إزالة التشكيل
+    text = re.sub(r'[\u064E-\u065F]', '', text)
     return text
+
+def stem_text(text):
+    """تجذيع بسيط للنص باستخدام قاموس الجذور"""
+    words = text.split()
+    stemmed = []
+    for w in words:
+        stemmed.append(stem_word(w))
+    return ' '.join(stemmed)
 
 def contains_any(text, keywords):
     """التحقق من وجود أي كلمة من القائمة في النص (مع التطبيع)"""
     normalized = normalize_text(text)
     for kw in keywords:
-        # تطبيع الكلمة المفتاحية أيضاً
         normalized_kw = normalize_text(kw)
         if normalized_kw in normalized:
             return True
@@ -158,6 +250,16 @@ def count_keywords(text, keywords):
             count += 1
     return count
 
+def count_keywords_stem(text, keywords):
+    """حساب عدد الكلمات بعد التجذيع"""
+    stemmed_text = stem_text(normalize_text(text))
+    count = 0
+    for kw in keywords:
+        stemmed_kw = stem_text(normalize_text(kw))
+        if stemmed_kw in stemmed_text:
+            count += 1
+    return count
+
 def has_link(text):
     """كشف الروابط بأنواعها"""
     patterns = [
@@ -169,6 +271,18 @@ def has_link(text):
         if re.search(pat, text):
             return True
     return False
+
+def count_links(text):
+    """عدد الروابط في النص"""
+    patterns = [
+        r'https?://\S+', r't\.me/\S+', r'wa\.me/\S+', r'telegram\.me/\S+',
+        r'@\w+', r'\+\d{9,}', r'\d{10,}',
+        r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    ]
+    count = 0
+    for pat in patterns:
+        count += len(re.findall(pat, text))
+    return count
 
 def has_emoji(text):
     """الكشف عن الرموز التعبيرية"""
@@ -186,17 +300,45 @@ def has_emoji(text):
         "]+", flags=re.UNICODE)
     return bool(emoji_pattern.search(text))
 
+def count_emojis(text):
+    """عدد الرموز التعبيرية في النص"""
+    emoji_pattern = re.compile("["
+        u"\U0001F600-\U0001F64F"  # emoticons
+        u"\U0001F300-\U0001F5FF"  # symbols & pictographs
+        u"\U0001F680-\U0001F6FF"  # transport & map symbols
+        u"\U0001F1E0-\U0001F1FF"  # flags (iOS)
+        u"\U00002500-\U00002BEF"  # chinese char
+        u"\U00002702-\U000027B0"
+        u"\U000024C2-\U0001F251"
+        u"\U0001f926-\U0001f937"
+        u"\U00010000-\U0010ffff"
+        u"\u2600-\u26FF\u2B50\u23F8\u23F9\u23FA"
+        "]+", flags=re.UNICODE)
+    return len(emoji_pattern.findall(text))
+
 def detect_markdown(text):
     """كشف التنسيقات (قوائم، نجوم، إلخ)"""
     patterns = [
         r'\*.*\*', r'\-.*\-', r'^\d+\.', r'^\•', r'^\-', r'^\*', r'^\d+\)',
         r'\[.*\]\(.*\)', r'\|.*\|', r'^\#', r'^#{1,6}', r'✅', r'⭐', r'♦️',
-        r'▪️', r'▫️', r'🔹', r'🔸', r'🛑', r'⚠️'
+        r'▪️', r'▫️', r'🔹', r'🔸', r'🛑', r'⚠️', r'✔️', r'❌', r'❗', r'❓'
     ]
     for pat in patterns:
         if re.search(pat, text, re.MULTILINE):
             return True
     return False
+
+def count_markdown(text):
+    """عدد عناصر التنسيق"""
+    patterns = [
+        r'\*.*?\*', r'\-.*?\-', r'^\d+\.', r'^\•', r'^\-', r'^\*', r'^\d+\)',
+        r'\[.*?\]\(.*?\)', r'\|.*?\|', r'^\#', r'^#{1,6}', r'✅', r'⭐', r'♦️',
+        r'▪️', r'▫️', r'🔹', r'🔸', r'🛑', r'⚠️', r'✔️', r'❌', r'❗', r'❓'
+    ]
+    count = 0
+    for pat in patterns:
+        count += len(re.findall(pat, text, re.MULTILINE))
+    return count
 
 def has_list_pattern(text):
     """كشف وجود قائمة منظمة (عدة أسطر تبدأ برموز)"""
@@ -207,46 +349,179 @@ def has_list_pattern(text):
         line = line.strip()
         if line and (line[0] in list_markers or line.startswith(tuple(str(i)+'.' for i in range(1,10)))):
             count += 1
-    return count >= 3
+    return count
+
+def count_list_items(text):
+    """عدد عناصر القائمة"""
+    lines = text.split('\n')
+    list_markers = ['•', '-', '*', '▪️', '▫️', '🔹', '🔸', '⭐', '✅', '♦️', '◾', '◽']
+    count = 0
+    for line in lines:
+        line = line.strip()
+        if line and (line[0] in list_markers or line.startswith(tuple(str(i)+'.' for i in range(1,10)))):
+            count += 1
+    return count
+
+def contains_number(text):
+    """هل يحتوي النص على أرقام (قد تكون أسعار)"""
+    return bool(re.search(r'\d+', text))
+
+def count_numbers(text):
+    """عدد الأرقام في النص"""
+    return len(re.findall(r'\d+', text))
+
+def is_question(text):
+    """هل النص عبارة عن سؤال (يحتوي على علامات استفهام)"""
+    return '?' in text or '؟' in text
+
+def count_questions(text):
+    """عدد علامات الاستفهام"""
+    return text.count('?') + text.count('؟')
+
+def contains_price(text):
+    """كشف وجود أسعار (مثل 50 ريال، 100$، إلخ)"""
+    patterns = [
+        r'\d+\s*(ريال|دولار|دينار|جنيه|ليرة|يورو|€|\$|₺)',
+        r'(ريال|دولار|دينار|جنيه|ليرة|يورو|€|\$|₺)\s*\d+',
+        r'سعر\s*\d+', r'بـ\s*\d+', r'بقيمة\s*\d+', r'مقابل\s*\d+',
+        r'خصم\s*\d+', r'عرض\s*\d+',
+    ]
+    for pat in patterns:
+        if re.search(pat, text, re.IGNORECASE):
+            return True
+    return False
+
+def count_price_mentions(text):
+    """عدد إشارات الأسعار"""
+    patterns = [
+        r'\d+\s*(ريال|دولار|دينار|جنيه|ليرة|يورو|€|\$|₺)',
+        r'(ريال|دولار|دينار|جنيه|ليرة|يورو|€|\$|₺)\s*\d+',
+        r'سعر\s*\d+', r'بـ\s*\d+', r'بقيمة\s*\d+', r'مقابل\s*\d+',
+        r'خصم\s*\d+', r'عرض\s*\d+',
+    ]
+    count = 0
+    for pat in patterns:
+        count += len(re.findall(pat, text, re.IGNORECASE))
+    return count
+
+def contains_exclamation(text):
+    """هل يحتوي على علامات تعجب (تشير إلى الإثارة)"""
+    return '!' in text or '‼' in text or '⁉' in text
+
+def count_exclamations(text):
+    return text.count('!') + text.count('‼') + text.count('⁉')
 
 def classify_local(text):
     """
-    تصنيف محلي يعتمد على القواعد (بدون ذكاء اصطناعي خارجي)
+    تصنيف محلي متطور يعتمد على العديد من الميزات والقواعد
     يرجع dict: {'type': 'seeker'/'inquiry'/'marketer', 'confidence': 0-100, 'reason': str}
     """
     text = text.strip()
     if not text:
-        return {'type': 'inquiry', 'confidence': 0, 'reason': 'empty'}
+        return {'type': 'inquiry', 'confidence': 0, 'reason': 'فارغ'}
 
-    # حساب النتائج
+    # الميزات الأساسية
+    length = len(text)
+    word_count = len(text.split())
+
+    # حساب الكلمات المفتاحية بأنواعها
     seeker_count = count_keywords(text, SEEKER_KEYWORDS)
     marketer_count = count_keywords(text, MARKETER_KEYWORDS)
     inquiry_count = count_keywords(text, INQUIRY_KEYWORDS)
-    links = has_link(text)
-    emojis = has_emoji(text)
-    markdown = detect_markdown(text)
-    listy = has_list_pattern(text)
-    length = len(text)
-    has_question_mark = '?' in text or '؟' in text
 
-    # وزن النتائج
-    score_seeker = seeker_count * 3 + (1 if not links else 0) + (1 if has_question_mark and seeker_count > 0 else 0)
-    score_marketer = marketer_count * 4 + (5 if links else 0) + (3 if listy else 0) + (2 if markdown else 0) + (1 if emojis else 0)
-    score_inquiry = inquiry_count * 2 + (2 if has_question_mark else 0) + (1 if length < 150 and seeker_count == 0 and marketer_count == 0 else 0)
+    # الكلمات بعد التجذيع
+    seeker_stem = count_keywords_stem(text, SEEKER_KEYWORDS)
+    marketer_stem = count_keywords_stem(text, MARKETER_KEYWORDS)
+    inquiry_stem = count_keywords_stem(text, INQUIRY_KEYWORDS)
+
+    # الروابط والأرقام
+    links = count_links(text)
+    numbers = count_numbers(text)
+    price = count_price_mentions(text)
+
+    # الرموز والتنسيقات
+    emojis = count_emojis(text)
+    markdown = count_markdown(text)
+    list_items = count_list_items(text)
+    questions = count_questions(text)
+    exclamations = count_exclamations(text)
+
+    # نسب وتجميع
+    total_keywords = seeker_count + marketer_count + inquiry_count
+    seeker_ratio = seeker_count / (total_keywords + 1)
+    marketer_ratio = marketer_count / (total_keywords + 1)
+    inquiry_ratio = inquiry_count / (total_keywords + 1)
+
+    # أوزان متقدمة
+    # كلما زادت الروابط، زاد احتمال كونه معلن
+    weight_marketer_links = links * 5
+    # الأسعار تدل على الإعلان
+    weight_marketer_price = price * 8
+    # الرموز التعبيرية والتنسيقات تدل على الإعلان
+    weight_marketer_emojis = emojis * 1.5
+    weight_marketer_markdown = markdown * 1.5
+    weight_marketer_list = list_items * 2
+
+    # وجود كلمات مفتاحية معلن
+    weight_marketer_keywords = marketer_count * 3
+    weight_marketer_stem = marketer_stem * 2
+
+    weight_seeker_keywords = seeker_count * 4
+    weight_seeker_stem = seeker_stem * 3
+    weight_seeker_question = questions * 2
+    # الأسئلة القصيرة تميل للاستفسار
+    if length < 100 and questions > 0:
+        weight_seeker_question += 3
+
+    weight_inquiry_keywords = inquiry_count * 3
+    weight_inquiry_stem = inquiry_stem * 2
+    weight_inquiry_question = questions * 4
+    # الأسئلة بدون كلمات معلن أو طالب تزيد وزن الاستفسار
+    if questions > 0 and marketer_count == 0 and seeker_count == 0:
+        weight_inquiry_question += 10
+
+    # عقوبات
+    # إذا كان هناك كلمات معلن وروابط، يعزز المعلن
+    if marketer_count > 0 and links > 0:
+        weight_marketer_links += 10
+
+    # إذا كان هناك كلمات طالب ولكن مع روابط، قد يكون معلن متخفي
+    if seeker_count > 0 and links > 0:
+        weight_seeker_keywords *= 0.7  # تخفيض وزن الطالب
+
+    # حساب الدرجات النهائية
+    score_marketer = (weight_marketer_keywords + weight_marketer_stem +
+                      weight_marketer_links + weight_marketer_price +
+                      weight_marketer_emojis + weight_marketer_markdown +
+                      weight_marketer_list)
+
+    score_seeker = (weight_seeker_keywords + weight_seeker_stem +
+                    weight_seeker_question)
+
+    score_inquiry = (weight_inquiry_keywords + weight_inquiry_stem +
+                     weight_inquiry_question)
+
+    # إذا كانت الرسالة طويلة جداً جداً وقد تحتوي على قوائم، تزيد احتمالية الإعلان
+    if length > 500 and list_items > 3:
+        score_marketer += 20
+
+    # إذا كانت الرسالة قصيرة جداً وتحتوي على استفهام، قد تكون استفسار
+    if length < 30 and questions > 0:
+        score_inquiry += 5
 
     # تسجيل لأغراض التصحيح
-    logging.debug(f"Seeker score: {score_seeker}, Marketer: {score_marketer}, Inquiry: {score_inquiry}")
+    logging.debug(f"Seeker score: {score_seeker:.2f}, Marketer: {score_marketer:.2f}, Inquiry: {score_inquiry:.2f}")
 
     # تحديد النوع بناءً على أعلى درجة
-    if score_marketer > score_seeker and score_marketer > score_inquiry and score_marketer >= 3:
-        return {'type': 'marketer', 'confidence': min(100, score_marketer * 10), 'reason': f'marker_score={score_marketer}'}
-    elif score_seeker > score_marketer and score_seeker > score_inquiry and score_seeker >= 2:
-        return {'type': 'seeker', 'confidence': min(100, score_seeker * 10), 'reason': f'seeker_score={score_seeker}'}
-    elif score_inquiry > score_seeker and score_inquiry > score_marketer and score_inquiry >= 1:
-        return {'type': 'inquiry', 'confidence': min(100, score_inquiry * 15), 'reason': f'inquiry_score={score_inquiry}'}
+    if score_marketer > score_seeker and score_marketer > score_inquiry and score_marketer >= 5:
+        return {'type': 'marketer', 'confidence': min(100, int(score_marketer * 1.5)), 'reason': f'marketer_score={int(score_marketer)}'}
+    elif score_seeker > score_marketer and score_seeker > score_inquiry and score_seeker >= 5:
+        return {'type': 'seeker', 'confidence': min(100, int(score_seeker * 1.5)), 'reason': f'seeker_score={int(score_seeker)}'}
+    elif score_inquiry > score_marketer and score_inquiry > score_seeker and score_inquiry >= 5:
+        return {'type': 'inquiry', 'confidence': min(100, int(score_inquiry * 1.5)), 'reason': f'inquiry_score={int(score_inquiry)}'}
     else:
         # لو مش واضح، نصنف كـ seeker افتراضياً (لأننا لا نريد فقدان طلاب)
-        return {'type': 'seeker', 'confidence': 30, 'reason': 'default'}
+        return {'type': 'seeker', 'confidence': 30, 'reason': 'افتراضي'}
 
 # -------------------- دوال التصنيف بـ OpenRouter (اختياري) --------------------
 async def classify_with_openrouter(text, api_key, prompt_template):
@@ -255,7 +530,6 @@ async def classify_with_openrouter(text, api_key, prompt_template):
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
-        # استخدام برومبت متخصص للتصنيف الثلاثي مع مراعاة العامية
         enhanced_prompt = prompt_template + """
 
 قواعد التصنيف (مع مراعاة العامية الخليجية والعربية):
@@ -330,7 +604,6 @@ async def monitor_account(acc, openrouter_cfg):
 
         logging.info(f"✅ {phone} متصل")
 
-        # التحقق من القنوات
         for ch in [main_channel, inquiry_channel, spam_channel]:
             if ch:
                 try:
@@ -346,12 +619,10 @@ async def monitor_account(acc, openrouter_cfg):
             if event.out:
                 return
 
-            # نقرأ الكلمات المفتاحية من الملف (كمرشح أولي)
             targets = load_keywords()
             msg_text = event.raw_text
             msg_lower = msg_text.lower()
 
-            # إذا لم تحتوي الرسالة على أي كلمة من القائمة، نتجاهلها (توفير للموارد)
             if targets and not any(kw.lower() in msg_lower for kw in targets):
                 return
 
@@ -359,13 +630,11 @@ async def monitor_account(acc, openrouter_cfg):
             chat_name = getattr(chat, 'title', 'غير معروف')
             logging.info(f"🔍 رصد رسالة في '{chat_name}' بواسطة {phone}")
 
-            # التصنيف المتقدم
-            intent = "seeker"  # افتراضي
+            intent = "seeker"
             confidence = 50
             reason = ""
 
             if openrouter_cfg.get("enabled") and openrouter_cfg.get("api_key"):
-                # استخدام الذكاء الاصطناعي الخارجي
                 ai_result = await classify_with_openrouter(
                     msg_text,
                     openrouter_cfg["api_key"],
@@ -377,14 +646,12 @@ async def monitor_account(acc, openrouter_cfg):
                     reason = ai_result.get("reason", "")
                     logging.info(f"🤖 AI: {intent} (ثقة {confidence}) - {reason}")
             else:
-                # تصنيف محلي يعتمد على القواعد
                 local = classify_local(msg_text)
                 intent = local['type']
                 confidence = local['confidence']
                 reason = local['reason']
                 logging.info(f"📊 محلي: {intent} (ثقة {confidence}) - {reason}")
 
-            # اختيار القناة المستهدفة
             target_channel = None
             if intent == "marketer" and spam_channel:
                 target_channel = spam_channel
@@ -396,7 +663,6 @@ async def monitor_account(acc, openrouter_cfg):
                 target_channel = main_channel
                 logging.info(f"✅ طالب -> القناة الرئيسية")
             else:
-                # إذا لم توجد القناة المناسبة، نرسل للقناة الرئيسية إن وجدت
                 target_channel = main_channel or inquiry_channel or spam_channel
                 logging.warning(f"⚠️ لم تحدد القناة المناسبة، نرسل إلى أول قناة متاحة")
 
@@ -404,7 +670,6 @@ async def monitor_account(acc, openrouter_cfg):
                 logging.warning(f"⚠️ لا توجد قناة محددة للحساب {phone}")
                 return
 
-            # جمع معلومات المرسل والمجموعة
             sender = await event.get_sender()
             sender_name = getattr(sender, 'first_name', '') or ''
             if getattr(sender, 'last_name', None):
@@ -424,13 +689,12 @@ async def monitor_account(acc, openrouter_cfg):
             else:
                 chat_link = f"https://t.me/c/{chat_id}/{event.id}"
 
-            # بناء الإشعار (مع إضافة التصنيف)
             info = (
                 f"🚨 **رادار ذكي - تصنيف: {intent}**\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"📝 النص الأصلي: {msg_text}\n"
-                f"👤 المرسل: {sender_name} - [رابط]({sender_link})\n"
-                f"🏢 المجموعة: {chat_name} - [رابط]({chat_link})\n"
+                f"👤 المرسل: {sender_name} - {sender_link}\n"
+                f"🏢 المجموعة: {chat_name} - {chat_link}\n"
                 f"👤 الحساب الراصد: {phone}\n"
                 f"🤖 التصنيف: {intent} (ثقة {confidence}%)\n"
                 f"📊 السبب: {reason}\n"
@@ -439,13 +703,11 @@ async def monitor_account(acc, openrouter_cfg):
 
             try:
                 dest = await client.get_entity(target_channel)
-                # محاولة إعادة التوجيه
                 try:
                     await client.forward_messages(dest, event.message)
                     await client.send_message(dest, info)
                     logging.info(f"📤 تم إرسال التنبيه (إعادة توجيه) إلى {target_channel}")
                 except errors.ChatForwardsRestrictedError:
-                    # إذا منع التحويل، نرسل نسخة مع التذييل
                     full_msg = f"{msg_text}\n\n{info}"
                     if event.message.media:
                         await client.send_file(dest, event.message.media, caption=full_msg)
@@ -471,7 +733,7 @@ async def monitor_account(acc, openrouter_cfg):
         if client in clients:
             clients.remove(client)
 
-# -------------------- دوال تحميل/حفظ الإعدادات (مثل السابق) --------------------
+# -------------------- دوال تحميل/حفظ الإعدادات --------------------
 def load_config():
     global accounts
     if os.path.exists(CONFIG_FILE):
@@ -500,7 +762,6 @@ def load_keywords():
             keywords = [line.strip() for line in f if line.strip()]
             if keywords:
                 return keywords
-    # قائمة افتراضية موسعة
     default_keywords = [
         'مساعدة', 'ساعدوني', 'ساعدني', 'أبي أحد', 'أبي حد', 'أبي مساعدة',
         'محتاج', 'محتاجة', 'ضروري', 'واجب', 'واجبات', 'تكليف', 'تكاليف',
@@ -876,7 +1137,6 @@ def get_log():
             return "".join(lines[-100:])
     return ""
 
-# -------------------- دالة تشغيل الرادار --------------------
 async def run_radar():
     global running
     config = load_config()
@@ -909,7 +1169,7 @@ def stop_radar():
 
 if __name__ == '__main__':
     if not os.path.exists(KEYWORDS_FILE):
-        save_keywords([])  # سيتم إنشاء القائمة الافتراضية في load_keywords
+        save_keywords([])
     if not os.path.exists(CONFIG_FILE):
         save_config([], {"api_key": "", "enabled": False, "prompt": "قم بتصنيف الرسالة إلى seeker, inquiry, أو marketer."})
     
